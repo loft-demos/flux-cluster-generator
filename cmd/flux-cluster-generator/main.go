@@ -335,16 +335,31 @@ func (r *SecretMirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request
 }
 
 func (r *SecretMirrorReconciler) ensureRSIPAbsence(ctx context.Context, secretNN types.NamespacedName) error {
-	// Find RSIPs that reference this Secret via label mirror.fluxcd.io/secretRef
-	var list unstructured.UnstructuredList
-	list.SetGroupVersionKind(schema.GroupVersionKind{Group: rsipGVK.Group, Version: rsipGVK.Version, Kind: rsipGVK.Kind + "List"})
-	if err := r.List(ctx, &list, client.InNamespace(r.RSIPNamespace), client.MatchingLabels{"mirror.fluxcd.io/secretRef": fmt.Sprintf("%s/%s", secretNN.Namespace, secretNN.Name)}); err != nil {
-		return err
-	}
-	for i := range list.Items {
-		_ = r.Delete(ctx, &list.Items[i])
-	}
-	return nil
+    // A) Best-effort delete by deterministic name
+    byName := &unstructured.Unstructured{}
+    byName.SetGroupVersionKind(rsipGVK)
+    byName.SetNamespace(r.RSIPNamespace)
+    byName.SetName(r.RSIPNamePrefix + secretNN.Name)
+    _ = r.Delete(ctx, byName) // ignore NotFound
+
+    // B) Delete any RSIPs labeled with the *new* split labels
+    var list unstructured.UnstructuredList
+    list.SetGroupVersionKind(schema.GroupVersionKind{
+        Group: rsipGVK.Group, Version: rsipGVK.Version, Kind: rsipGVK.Kind + "List",
+    })
+    if err := r.List(ctx, &list,
+        client.InNamespace(r.RSIPNamespace),
+        client.MatchingLabels{
+            "mirror.fluxcd.io/secretNS":   secretNN.Namespace,
+            "mirror.fluxcd.io/secretName": secretNN.Name,
+        },
+    ); err != nil {
+        return err
+    }
+    for i := range list.Items {
+        _ = r.Delete(ctx, &list.Items[i])
+    }
+    return nil
 }
 
 // --- helpers ---
