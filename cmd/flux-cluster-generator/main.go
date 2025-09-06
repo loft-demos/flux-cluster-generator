@@ -255,7 +255,8 @@ func (r *SecretMirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	// Labels to apply onto RSIP (baseline)
 	labelsToApply := map[string]string{
 		"mirror.fluxcd.io/managed":     "true",
-		"mirror.fluxcd.io/secretRef":   fmt.Sprintf("%s/%s", sec.Namespace, sec.Name),
+		"mirror.fluxcd.io/secretNS":      sec.Namespace, 
+    	"mirror.fluxcd.io/secretName":    sec.Name,      
 		"mirror.fluxcd.io/secretKey":   r.SecretKey,
 		"mirror.fluxcd.io/clusterName": clusterName,
 	}
