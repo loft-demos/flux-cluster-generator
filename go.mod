@@ -1,14 +1,12 @@
 module github.com/loft-demos/flux-cluster-generator
 
-go 1.22.0
-
-toolchain go1.23.5
+go 1.23.0
 
 require (
 	k8s.io/api v0.30.3
 	k8s.io/apimachinery v0.30.3
 	k8s.io/client-go v0.30.3
-	sigs.k8s.io/controller-runtime v0.17.5
+	sigs.k8s.io/controller-runtime v0.18.4
 )
 
 require (
