@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"maps"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -275,9 +276,9 @@ func (r *SecretMirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	// Update if drifted
 	changed := false
-	if !labels.Equals(labels.Set(existing.GetLabels()), labels.Set(desired.GetLabels())) {
-		existing.SetLabels(desired.GetLabels())
-		changed = true
+	if !maps.Equal(existing.GetLabels(), desired.GetLabels()) {
+	    existing.SetLabels(desired.GetLabels())
+	    changed = true
 	}
 	curSpec, _, _ := unstructured.NestedMap(existing.Object, "spec")
 	desSpec, _, _ := unstructured.NestedMap(desired.Object, "spec")
