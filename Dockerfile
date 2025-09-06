@@ -18,6 +18,11 @@ RUN --mount=type=cache,target=/go/pkg/mod go mod download
 # 2) Copy ALL sources (temporarily) to rule out path issues
 COPY . .
 
+# 2.5) Ensure go.sum matches current imports (prevents “missing go.sum entry” in CI)
+RUN --mount=type=cache,target=/go/pkg/mod go mod tidy
+
+RUN go version && go env
+
 # 3) Print layout, then build (plain sh; no heredoc swallowing)
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build <<'EOF'
