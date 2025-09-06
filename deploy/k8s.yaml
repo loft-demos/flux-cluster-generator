@@ -74,7 +74,7 @@ spec:
           imagePullPolicy: IfNotPresent
           args:
             # Select cluster Secrets by labels (these are labels ON the Secret)
-            - "--label-selector=fluxcd/secret-type=cluster"
+            - "--label-selector=fluxcd.io/secret-type=cluster"
             # Only consider Secrets in Namespaces with this label
             - "--namespace-label-selector=flux-cluster-generator-enabled=true"
             # Create RSIPs into this namespace (must exist & be watched by Flux Operator)
