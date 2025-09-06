@@ -278,12 +278,10 @@ func (r *SecretMirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	spec := map[string]any{
 		"type": "Static",
 		"defaultValues": map[string]any{
-			"cluster": map[string]any{
-				"name":           clusterName,
-				"kubeSecretName": sec.Name,
-				"kubeSecretKey":  r.SecretKey,
-				"kubeSecretNS":   sec.Namespace,
-			},
+			"name":           clusterName,
+			"kubeSecretName": sec.Name,
+			"kubeSecretKey":  r.SecretKey,
+			"kubeSecretNS":   sec.Namespace,
 		},
 	}
 	_ = unstructured.SetNestedField(desired.Object, spec, "spec")
