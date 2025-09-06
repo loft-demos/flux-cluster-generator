@@ -88,6 +88,9 @@ func main() {
 
 	c := mgr.GetClient()
 
+	// uncached reader (safe before mgr.Start)
+    apiReader := mgr.GetAPIReader()
+
 	// Parse Secret label selector
 	var secSel labels.Selector
 	if labelSelectorStr != "" {
@@ -133,20 +136,23 @@ func main() {
 		}
 	}
 
-	// Seed AllowedNS with existing namespaces that match nsSel (AFTER nsSel & allowedNS exist)
-    {
-        var nsList corev1.NamespaceList
-        if err := c.List(context.Background(), &nsList); err != nil {
-            logger.Error(err, "failed to list namespaces at startup")
-            os.Exit(1)
-        }
-        for i := range nsList.Items {
-            if nsSel.Matches(labels.Set(nsList.Items[i].Labels)) {
-                allowedNS.Add(nsList.Items[i].Name)
-            }
-        }
-        logger.Info("seeded allowed namespaces", "count", len(nsList.Items))
-    }
+	// Seed AllowedNS with existing namespaces that match nsSel (before mgr.Start)
+	{
+	    var nsList corev1.NamespaceList
+	    // use the uncached API reader here
+	    ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	    defer cancel()
+	    if err := apiReader.List(ctx, &nsList); err != nil {
+	        logger.Error(err, "failed to list namespaces at startup")
+	        os.Exit(1)
+	    }
+	    for i := range nsList.Items {
+	        if nsSel.Matches(labels.Set(nsList.Items[i].Labels)) {
+	            allowedNS.Add(nsList.Items[i].Name)
+	        }
+	    }
+	    logger.Info("seeded allowed namespaces", "count", len(nsList.Items))
+	}
 	
 	nsPred := predicate.NewPredicateFuncs(func(o client.Object) bool { return nsSel.Matches(labels.Set(o.GetLabels())) })
 	if err := ctrl.NewControllerManagedBy(mgr).
