@@ -46,6 +46,7 @@ var (
 	rsipNamePrefix            string
 	clusterNameKey            string
 	copyLabelKeysCSV          string
+	copyLabelPrefixesCSV      string
 	namespaceLabelSelectorStr string
 )
 
@@ -60,6 +61,7 @@ func main() {
 	flag.StringVar(&rsipNamePrefix, "rsip-name-prefix", "inputs-", "Prefix for generated RSIP names")
 	flag.StringVar(&clusterNameKey, "cluster-name-label-key", "vcluster.loft.sh/cluster-name", "Label key on the Secret to derive cluster name")
 	flag.StringVar(&copyLabelKeysCSV, "copy-label-keys", "env,team,region", "Comma-separated label keys to copy from Secret to RSIP")
+	flag.StringVar(&copyLabelPrefixesCSV, "copy-label-prefixes", "", "Comma-separated label key prefixes to copy from Secret to RSIP (e.g. flux-app/)")
 	flag.StringVar(&namespaceLabelSelectorStr, "namespace-label-selector", "", "Label selector for Namespaces to include")
 	flag.Parse()
 
@@ -93,6 +95,8 @@ func main() {
 		copyLabelKeys.Insert(strings.TrimSpace(k))
 	}
 
+	copyLabelPrefixes := splitNonEmpty(copyLabelPrefixesCSV)
+
 	allowedNS := newThreadSafeSet()
 
 	reconciler := &SecretMirrorReconciler{
@@ -103,6 +107,7 @@ func main() {
 		RSIPNamePrefix:  rsipNamePrefix,
 		ClusterNameKey:  clusterNameKey,
 		CopyLabelKeys:   copyLabelKeys,
+		CopyLabelPrefixes: copyLabelPrefixes,
 		AllowedNS:       allowedNS,
 	}
 
@@ -153,5 +158,6 @@ type SecretMirrorReconciler struct {
 	RSIPNamePrefix string
 	ClusterNameKey string
 	CopyLabelKeys  sets.Set[string]
+	CopyLabelPrefixes []string
 	AllowedNS      *threadSafeSet
 }
