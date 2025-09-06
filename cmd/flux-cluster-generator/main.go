@@ -146,7 +146,7 @@ func main() {
 		}))).
 		WithOptions(controller.Options{
 			CacheSyncTimeout:        2 * time.Minute,
-			RecoverPanic:            true,
+			RecoverPanic:            func() *bool { v := true; return &v }(),
 			RateLimiter:             workqueue.DefaultControllerRateLimiter(),
 			MaxConcurrentReconciles: 2,
 		})
@@ -157,9 +157,13 @@ func main() {
 		if ns == "" {
 			continue
 		}
-		b = b.Watches(&source.Kind{Type: &corev1.Secret{}}, &handler.EnqueueRequestForObject{}, builder.WithPredicates(predicate.NewPredicateFuncs(func(o client.Object) bool {
-			return o.GetNamespace() == ns && secSel.Matches(labels.Set(o.GetLabels())) && allowedNS.Has(o.GetNamespace())
-		})))
+		b = b.Watches(
+		    source.Kind(mgr.GetCache(), &corev1.Secret{}),
+		    &handler.EnqueueRequestForObject{},
+		    builder.WithPredicates(predicate.NewPredicateFuncs(func(o client.Object) bool {
+		         return o.GetNamespace() == ns && secSel.Matches(labels.Set(o.GetLabels())) && allowedNS.Has(o.GetNamespace())
+		    })),
+		 )
 	}
 
 	if err := b.Complete(reconciler); err != nil {
