@@ -101,28 +101,13 @@ func main() {
 		secSel = labels.Everything()
 	}
 
-	// Seed AllowedNS with existing namespaces that match nsSel
-	{
-	    var nsList corev1.NamespaceList
-	    if err := c.List(context.Background(), &nsList); err != nil {
-	        logger.Error(err, "failed to list namespaces at startup")
-	        os.Exit(1)
-	    }
-	    for i := range nsList.Items {
-	        ns := &nsList.Items[i]
-	        if nsSel.Matches(labels.Set(ns.Labels)) {
-	            allowedNS.Add(ns.Name)
-	        }
-	    }
-	    logger.Info("seeded allowed namespaces", "count", len(nsList.Items))
-	}
-
 	copyLabelKeys := sets.New[string]()
 	for _, k := range splitNonEmpty(copyLabelKeysCSV) {
 		copyLabelKeys.Insert(strings.TrimSpace(k))
 	}
 	copyLabelPrefixes := splitNonEmpty(copyLabelPrefixesCSV)
 
+	// create the shared set before using it
 	allowedNS := newThreadSafeSet()
 
 	reconciler := &SecretMirrorReconciler{
@@ -147,6 +132,22 @@ func main() {
 			os.Exit(1)
 		}
 	}
+
+	// Seed AllowedNS with existing namespaces that match nsSel (AFTER nsSel & allowedNS exist)
+    {
+        var nsList corev1.NamespaceList
+        if err := c.List(context.Background(), &nsList); err != nil {
+            logger.Error(err, "failed to list namespaces at startup")
+            os.Exit(1)
+        }
+        for i := range nsList.Items {
+            if nsSel.Matches(labels.Set(nsList.Items[i].Labels)) {
+                allowedNS.Add(nsList.Items[i].Name)
+            }
+        }
+        logger.Info("seeded allowed namespaces", "count", len(nsList.Items))
+    }
+	
 	nsPred := predicate.NewPredicateFuncs(func(o client.Object) bool { return nsSel.Matches(labels.Set(o.GetLabels())) })
 	if err := ctrl.NewControllerManagedBy(mgr).
 		For(&corev1.Namespace{}, builder.WithPredicates(nsPred)).
