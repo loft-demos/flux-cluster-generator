@@ -4,19 +4,14 @@ kind: Namespace
 metadata:
   name: flux-cluster-generator
 ---
-# Optional: label a target application namespace so the controller will watch Secrets there
+# Optional: the RSIP target namespace (must be watched by Flux Operator)
+# label a target application namespace so the controller will watch Secrets there
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: team-payments
+  name: flux-apps
   labels:
     flux-cluster-generator-enabled: "true"
----
-# Optional: the RSIP target namespace (must be watched by Flux Operator)
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: apps
 ---
 apiVersion: v1
 kind: ServiceAccount
