@@ -137,34 +137,30 @@ func main() {
 		logger.Error(err, "unable to create namespace controller")
 		os.Exit(1)
 	}
+    // Convert CSV list into a set for quick membership checks
+    watchNS := sets.New[string]()
+    for _, ns := range splitNonEmpty(watchNamespacesCSV) {
+        watchNS.Insert(strings.TrimSpace(ns))
+    }
 
 	// Secret watcher
 	b := ctrl.NewControllerManagedBy(mgr).
-		For(&corev1.Secret{}, builder.WithPredicates(predicate.NewPredicateFuncs(func(o client.Object) bool {
-			// Filter by Secret labels and allowed namespace set
-			return secSel.Matches(labels.Set(o.GetLabels())) && allowedNS.Has(o.GetNamespace())
-		}))).
-		WithOptions(controller.Options{
-			CacheSyncTimeout:        2 * time.Minute,
-			RecoverPanic:            func() *bool { v := true; return &v }(),
-			RateLimiter:             workqueue.DefaultControllerRateLimiter(),
-			MaxConcurrentReconciles: 2,
-		})
-
-	// Optional: additionally pin to explicit namespaces list if provided
-	for _, ns := range splitNonEmpty(watchNamespacesCSV) {
-		ns = strings.TrimSpace(ns)
-		if ns == "" {
-			continue
-		}
-		b = b.Watches(
-		    source.Kind(mgr.GetCache(), &corev1.Secret{}),
-		    &handler.EnqueueRequestForObject{},
-		    builder.WithPredicates(predicate.NewPredicateFuncs(func(o client.Object) bool {
-		         return o.GetNamespace() == ns && secSel.Matches(labels.Set(o.GetLabels())) && allowedNS.Has(o.GetNamespace())
-		    })),
-		 )
-	}
+	    For(&corev1.Secret{}, builder.WithPredicates(
+	        predicate.NewPredicateFuncs(func(o client.Object) bool {
+	            // If a watch list was provided, only include those namespaces
+	            if watchNS.Len() > 0 && !watchNS.Has(o.GetNamespace()) {
+	                return false
+	            }
+	            // Filter by Secret labels and allowed namespace set
+	            return secSel.Matches(labels.Set(o.GetLabels())) && allowedNS.Has(o.GetNamespace())
+	        }),
+	    )).
+	    WithOptions(controller.Options{
+	        CacheSyncTimeout:        2 * time.Minute,
+	        RecoverPanic:            boolPtr(true), // v0.18 wants *bool
+	        RateLimiter:             workqueue.DefaultControllerRateLimiter(),
+	        MaxConcurrentReconciles: 2,
+	    })
 
 	if err := b.Complete(reconciler); err != nil {
 		logger.Error(err, "unable to create secret controller")
@@ -319,6 +315,8 @@ type threadSafeSet struct {
 	mu sync.RWMutex
 	m  map[string]struct{}
 }
+
+func boolPtr(b bool) *bool { return &b }
 
 func newThreadSafeSet() *threadSafeSet { return &threadSafeSet{m: map[string]struct{}{}} }
 
