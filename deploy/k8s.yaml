@@ -84,7 +84,8 @@ spec:
             # Derive cluster name from this Secret label; fallback = Secret name
             - "--cluster-name-label-key=vcluster.loft.sh/cluster-name"
             # Pass-through labels from Secret -> RSIP for ResourceSet selectors
-            - "--copy-label-keys=env,team,flux-app/name"
+            - "--copy-label-keys=env,team"
+            - "--copy-label-prefixes=flux-app/"
           resources:
             requests:
               cpu: 50m
