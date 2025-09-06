@@ -78,3 +78,9 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          build-args: |
+            GOPRIVATE=github.com/yourorg/*
+            GOPROXY=https://proxy.golang.org,direct
+          # If you have private modules on GitHub, uncomment secrets:
+          secrets: |
+            "GIT_AUTH_TOKEN=${{ secrets.GITHUB_TOKEN }}"
