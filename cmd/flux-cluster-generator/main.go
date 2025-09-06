@@ -79,8 +79,8 @@ func main() {
 
 	scheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(scheme)
+	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{Scheme: scheme})
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{Scheme: runtime.NewScheme()})
 	if err != nil {
 		logger.Error(err, "unable to start manager")
 		os.Exit(1)
