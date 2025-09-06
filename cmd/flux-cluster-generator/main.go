@@ -32,6 +32,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -168,21 +169,34 @@ func main() {
         watchNS.Insert(strings.TrimSpace(ns))
     }
 
-	// Secret watcher
+	// Secret watcher — allow deletes to pass so cleanup runs
+	secretPred := predicate.Funcs{
+	    CreateFunc: func(e event.CreateEvent) bool {
+	        return (watchNS.Len() == 0 || watchNS.Has(e.Object.GetNamespace())) &&
+	            secSel.Matches(labels.Set(e.Object.GetLabels())) &&
+	            allowedNS.Has(e.Object.GetNamespace())
+	    },
+	    UpdateFunc: func(e event.UpdateEvent) bool {
+	        return (watchNS.Len() == 0 || watchNS.Has(e.ObjectNew.GetNamespace())) &&
+	            secSel.Matches(labels.Set(e.ObjectNew.GetLabels())) &&
+	            allowedNS.Has(e.ObjectNew.GetNamespace())
+	    },
+	    GenericFunc: func(e event.GenericEvent) bool {
+	        return (watchNS.Len() == 0 || watchNS.Has(e.Object.GetNamespace())) &&
+	            secSel.Matches(labels.Set(e.Object.GetLabels())) &&
+	            allowedNS.Has(e.Object.GetNamespace())
+	    },
+	    // Key change: ALWAYS reconcile on delete so ensureRSIPAbsence runs
+	    DeleteFunc: func(e event.DeleteEvent) bool {
+	        return true
+	    },
+	}
+	
 	b := ctrl.NewControllerManagedBy(mgr).
-	    For(&corev1.Secret{}, builder.WithPredicates(
-	        predicate.NewPredicateFuncs(func(o client.Object) bool {
-	            // If a watch list was provided, only include those namespaces
-	            if watchNS.Len() > 0 && !watchNS.Has(o.GetNamespace()) {
-	                return false
-	            }
-	            // Filter by Secret labels and allowed namespace set
-	            return secSel.Matches(labels.Set(o.GetLabels())) && allowedNS.Has(o.GetNamespace())
-	        }),
-	    )).
+	    For(&corev1.Secret{}, builder.WithPredicates(secretPred)).
 	    WithOptions(controller.Options{
 	        CacheSyncTimeout:        2 * time.Minute,
-	        RecoverPanic:            boolPtr(true), // v0.18 wants *bool
+	        RecoverPanic:            boolPtr(true),
 	        RateLimiter:             workqueue.DefaultControllerRateLimiter(),
 	        MaxConcurrentReconciles: 2,
 	    })
