@@ -34,6 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 
@@ -205,6 +206,29 @@ func main() {
 	if err := b.Complete(reconciler); err != nil {
 		logger.Error(err, "unable to create secret controller")
 		os.Exit(1)
+	}
+
+	gcLog := ctrl.Log.WithName("gc")
+	if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
+	    ticker := time.NewTicker(2 * time.Minute) // pick an interval you like
+	    defer ticker.Stop()
+	
+	    // run once immediately
+	    _ = sweepOrphanRSIPs(ctx, gcLog, apiReader, c, rsipNamespace)
+	
+	    for {
+	        select {
+	        case <-ctx.Done():
+	            return nil
+	        case <-ticker.C:
+	            if err := sweepOrphanRSIPs(ctx, gcLog, apiReader, c, rsipNamespace); err != nil {
+	                gcLog.Error(err, "GC sweep failed")
+	            }
+	        }
+	    }
+	})); err != nil {
+	    logger.Error(err, "unable to add GC runnable")
+	    os.Exit(1)
 	}
 
 	logger.Info("starting manager")
@@ -423,6 +447,46 @@ func (r *NamespaceSetReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		r.AllowedNS.Delete(ns.Name)
 	}
 	return ctrl.Result{}, nil
+}
+
+func sweepOrphanRSIPs(ctx context.Context, log ctrl.Logger, apiReader client.Reader, kube client.Client, rsipNS string) error {
+    var rsips unstructured.UnstructuredList
+    rsips.SetGroupVersionKind(schema.GroupVersionKind{
+        Group: rsipGVK.Group, Version: rsipGVK.Version, Kind: rsipGVK.Kind + "List",
+    })
+
+    if err := apiReader.List(ctx, &rsips, client.InNamespace(rsipNS)); err != nil {
+        return err
+    }
+
+    for i := range rsips.Items {
+        rsip := &rsips.Items[i]
+        lbl := rsip.GetLabels()
+        secNS, okNS := lbl["mirror.fluxcd.io/secretNS"]
+        secName, okName := lbl["mirror.fluxcd.io/secretName"]
+        if !okNS || !okName || secNS == "" || secName == "" {
+            continue // not managed by us
+        }
+
+        // Does the Secret still exist?
+        var sec corev1.Secret
+        err := apiReader.Get(ctx, types.NamespacedName{Namespace: secNS, Name: secName}, &sec)
+        if client.IgnoreNotFound(err) != nil {
+            log.Error(err, "secret check failed", "rsip", rsip.GetName(), "secret", fmt.Sprintf("%s/%s", secNS, secName))
+            continue
+        }
+        if err == nil {
+            continue // secret exists
+        }
+
+        // Secret is gone -> delete RSIP
+        if err := kube.Delete(ctx, rsip); client.IgnoreNotFound(err) != nil {
+            log.Error(err, "failed deleting orphan RSIP", "name", rsip.GetName())
+        } else {
+            log.Info("deleted orphan RSIP", "name", rsip.GetName(), "secret", fmt.Sprintf("%s/%s", secNS, secName))
+        }
+    }
+    return nil
 }
 
 func splitNonEmpty(csv string) []string {
