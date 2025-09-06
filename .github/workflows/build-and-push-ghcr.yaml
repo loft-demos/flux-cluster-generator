@@ -28,6 +28,8 @@ concurrency:
 jobs:
   build-push:
     runs-on: ubuntu-latest
+    env:
+      BUILDX_PROGRESS: plain
 
     steps:
       - name: Checkout
