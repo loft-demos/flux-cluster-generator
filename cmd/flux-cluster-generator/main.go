@@ -65,7 +65,7 @@ func main() {
 	opts.BindFlags(flag.CommandLine)
 
 	flag.StringVar(&watchNamespacesCSV, "watch-namespaces", "", "Comma-separated namespaces to watch for Secrets. Empty = all namespaces")
-	flag.StringVar(&rsipNamespace, "rsip-namespace", "apps", "Namespace to create RSIPs in")
+	flag.StringVar(&rsipNamespace, "rsip-namespace", "flux-apps", "Namespace to create RSIPs in")
 	flag.StringVar(&labelSelectorStr, "label-selector", "", "Label selector for source Secrets, e.g. env=dev,team=payments,fluxcd/secret-type=cluster")
 	flag.StringVar(&secretKey, "secret-key", "config", "Key in the Secret data that contains the kubeconfig")
 	flag.StringVar(&rsipNamePrefix, "rsip-name-prefix", "inputs-", "Prefix for generated RSIP names")
@@ -116,6 +116,7 @@ func main() {
 
 	reconciler := &SecretMirrorReconciler{
 		Client:            c,
+		APIReader:         apiReader,
 		RSIPNamespace:     rsipNamespace,
 		Selector:          secSel,
 		SecretKey:         secretKey,
@@ -217,6 +218,7 @@ func main() {
 
 type SecretMirrorReconciler struct {
 	client.Client
+	APIReader        client.Reader
 	RSIPNamespace     string
 	Selector          labels.Selector
 	SecretKey         string
@@ -335,19 +337,22 @@ func (r *SecretMirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request
 }
 
 func (r *SecretMirrorReconciler) ensureRSIPAbsence(ctx context.Context, secretNN types.NamespacedName) error {
+    log := ctrl.Log.WithName("gc")
     // A) Best-effort delete by deterministic name
     byName := &unstructured.Unstructured{}
     byName.SetGroupVersionKind(rsipGVK)
     byName.SetNamespace(r.RSIPNamespace)
     byName.SetName(r.RSIPNamePrefix + secretNN.Name)
-    _ = r.Delete(ctx, byName) // ignore NotFound
+    if err := r.Delete(ctx, byName); client.IgnoreNotFound(err) != nil {
+        log.Error(err, "delete byName failed", "name", byName.GetName(), "ns", r.RSIPNamespace)
+    }
 
-    // B) Delete any RSIPs labeled with the *new* split labels
+    // B) List by labels using UN-CACHED reader (cache may not watch this GVK)
     var list unstructured.UnstructuredList
     list.SetGroupVersionKind(schema.GroupVersionKind{
         Group: rsipGVK.Group, Version: rsipGVK.Version, Kind: rsipGVK.Kind + "List",
     })
-    if err := r.List(ctx, &list,
+    if err := r.APIReader.List(ctx, &list,
         client.InNamespace(r.RSIPNamespace),
         client.MatchingLabels{
             "mirror.fluxcd.io/secretNS":   secretNN.Namespace,
@@ -356,8 +361,18 @@ func (r *SecretMirrorReconciler) ensureRSIPAbsence(ctx context.Context, secretNN
     ); err != nil {
         return err
     }
+
+    if len(list.Items) == 0 {
+        log.Info("no RSIPs found for deleted secret", "secret", secretNN.String(), "rsipNS", r.RSIPNamespace)
+        return nil
+    }
+
     for i := range list.Items {
-        _ = r.Delete(ctx, &list.Items[i])
+        if err := r.Delete(ctx, &list.Items[i]); client.IgnoreNotFound(err) != nil {
+            log.Error(err, "delete byLabels failed", "name", list.Items[i].GetName())
+        } else {
+            log.Info("deleted RSIP", "name", list.Items[i].GetName())
+        }
     }
     return nil
 }
