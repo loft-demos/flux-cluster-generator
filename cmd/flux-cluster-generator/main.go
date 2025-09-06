@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/util/workqueue"
+	"github.com/go-logr/logr"
 
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
@@ -210,11 +211,13 @@ func main() {
 
 	gcLog := ctrl.Log.WithName("gc")
 	if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
-	    ticker := time.NewTicker(2 * time.Minute) // pick an interval you like
+	    ticker := time.NewTicker(2 * time.Minute) // pick your interval
 	    defer ticker.Stop()
 	
-	    // run once immediately
-	    _ = sweepOrphanRSIPs(ctx, gcLog, apiReader, c, rsipNamespace)
+	    // Run once immediately
+	    if err := sweepOrphanRSIPs(ctx, gcLog, apiReader, c, rsipNamespace); err != nil {
+	        gcLog.Error(err, "initial GC sweep failed")
+	    }
 	
 	    for {
 	        select {
@@ -222,7 +225,7 @@ func main() {
 	            return nil
 	        case <-ticker.C:
 	            if err := sweepOrphanRSIPs(ctx, gcLog, apiReader, c, rsipNamespace); err != nil {
-	                gcLog.Error(err, "GC sweep failed")
+	                gcLog.Error(err, "periodic GC sweep failed")
 	            }
 	        }
 	    }
@@ -449,13 +452,19 @@ func (r *NamespaceSetReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	return ctrl.Result{}, nil
 }
 
-func sweepOrphanRSIPs(ctx context.Context, log ctrl.Logger, apiReader client.Reader, kube client.Client, rsipNS string) error {
+func sweepOrphanRSIPs(
+    ctx context.Context,
+    log logr.Logger,
+    reader client.Reader, // uncached APIReader
+    writer client.Client, // your manager client (delete)
+    rsipNS string,
+) error {
     var rsips unstructured.UnstructuredList
     rsips.SetGroupVersionKind(schema.GroupVersionKind{
         Group: rsipGVK.Group, Version: rsipGVK.Version, Kind: rsipGVK.Kind + "List",
     })
 
-    if err := apiReader.List(ctx, &rsips, client.InNamespace(rsipNS)); err != nil {
+    if err := reader.List(ctx, &rsips, client.InNamespace(rsipNS)); err != nil {
         return err
     }
 
@@ -465,22 +474,24 @@ func sweepOrphanRSIPs(ctx context.Context, log ctrl.Logger, apiReader client.Rea
         secNS, okNS := lbl["mirror.fluxcd.io/secretNS"]
         secName, okName := lbl["mirror.fluxcd.io/secretName"]
         if !okNS || !okName || secNS == "" || secName == "" {
-            continue // not managed by us
+            continue // not ours
         }
 
-        // Does the Secret still exist?
+        // Check if the Secret still exists (uncached)
         var sec corev1.Secret
-        err := apiReader.Get(ctx, types.NamespacedName{Namespace: secNS, Name: secName}, &sec)
+        err := reader.Get(ctx, types.NamespacedName{Namespace: secNS, Name: secName}, &sec)
         if client.IgnoreNotFound(err) != nil {
-            log.Error(err, "secret check failed", "rsip", rsip.GetName(), "secret", fmt.Sprintf("%s/%s", secNS, secName))
+            log.Error(err, "secret existence check failed",
+                "rsip", rsip.GetName(), "secret", fmt.Sprintf("%s/%s", secNS, secName))
             continue
         }
         if err == nil {
-            continue // secret exists
+            // Secret exists; keep the RSIP
+            continue
         }
 
-        // Secret is gone -> delete RSIP
-        if err := kube.Delete(ctx, rsip); client.IgnoreNotFound(err) != nil {
+        // Secret not found → delete the RSIP
+        if err := writer.Delete(ctx, rsip); client.IgnoreNotFound(err) != nil {
             log.Error(err, "failed deleting orphan RSIP", "name", rsip.GetName())
         } else {
             log.Info("deleted orphan RSIP", "name", rsip.GetName(), "secret", fmt.Sprintf("%s/%s", secNS, secName))
