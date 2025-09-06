@@ -1,46 +1,49 @@
-FROM --platform=$BUILDPLATFORM golang:1.22-alpine AS build
-# If any dep requires cgo later, uncomment next line:
-# RUN apk add --no-cache build-base
+# syntax=docker/dockerfile:1.7
 
+FROM --platform=$BUILDPLATFORM golang:1.22-alpine AS build
 WORKDIR /app
 
-# Buildx provides these; set sane defaults so local builds also work
+# Safer defaults so local (non-buildx) works too
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
-ARG GOPRIVATE
 
-ENV GOPRIVATE=${GOPRIVATE}
+# Reliable public proxy; avoids weird corporate MITM or GH rate limits
+ENV GOPROXY=https://proxy.golang.org,direct
 
-# 1) Prime module cache
+# 1) Bring in modules (best cache)
 COPY go.mod go.sum ./
-RUN --mount=type=cache,target=/go/pkg/mod \
-    go mod download
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
 
-# 2) Bring in the rest of the source your binary needs
-#    If you KNOW it only uses cmd/, keep it; otherwise copy pkg/ + internal/ (or just copy all).
-COPY cmd/flux-cluster-generator/ ./cmd/flux-cluster-generator/
-# If your code imports from pkg/ or internal/, uncomment:
-# COPY pkg/ ./pkg/
-# COPY internal/ ./internal/
-# Or (simplest & safest): COPY . .   (at the cost of a coarser cache key)
-# COPY . .
+# 2) Bring in *all* sources for now (to rule out missing dirs)
+#    Once it builds, you can revert to selective COPYs.
+COPY . .
 
-# 3) Build with BuildKit caches and verbose + strict shell to surface real errors
+# 3) Prove layout, then build. Plain sh here so output is not swallowed.
 RUN --mount=type=cache,target=/go/pkg/mod \
-    --mount=type=cache,target=/root/.cache/go-build <<'EOF'
-set -euxo pipefail
-echo "Go env:"
-go env
-echo "Listing module packages (helps spot missing dirs):"
-go list ./... || true
-# If you have private deps, you can wire a token via build secret and insteadof:
-# if [ -f /run/secrets/GIT_AUTH_TOKEN ]; then
-#   git config --global url."https://$(cat /run/secrets/GIT_AUTH_TOKEN)@github.com/".insteadof "https://github.com/"
-# fi
-CGO_ENABLED=${CGO_ENABLED:-0} GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
-  go build -v -trimpath -ldflags="-s -w" \
-    -o /out/flux-cluster-generator ./cmd/flux-cluster-generator
-EOF
+    --mount=type=cache,target=/root/.cache/go-build \
+    sh -ec '
+      set -eux
+      echo "TARGETOS=${TARGETOS} TARGETARCH=${TARGETARCH}"
+      echo "Top level:"
+      ls -la
+      echo "cmd tree:"
+      [ -d cmd ] && find cmd -maxdepth 2 -type f -name "*.go" -print || true
+      echo "go list (all):"
+      go list ./... || true
+
+      # If your main IS at cmd/flux-cluster-generator, build that path.
+      if [ -f cmd/flux-cluster-generator/main.go ]; then
+        BUILD_PATH=./cmd/flux-cluster-generator
+      else
+        # Fallback: build the module root (works if main.go is elsewhere)
+        BUILD_PATH=./
+      fi
+      echo "Building: ${BUILD_PATH}"
+
+      CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+        go build -v -trimpath -ldflags="-s -w" \
+          -o /out/flux-cluster-generator "${BUILD_PATH}"
+    '
 
 # 4) Minimal runtime
 FROM gcr.io/distroless/static:nonroot AS runtime
