@@ -321,17 +321,42 @@ func (r *SecretMirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 	desired.SetLabels(labelsToApply)
 
+	// ---- defaultValues with camelCase copies of selected labels ----
+	defaultValues := map[string]any{
+		"name":           clusterName,
+		"project":        project,
+		"kubeSecretName": sec.Name,
+		"kubeSecretKey":  r.SecretKey,
+		"kubeSecretNS":   sec.Namespace,
+	}
+	// Reserved keys we won't overwrite
+	reserved := sets.New[string]("name", "project", "kubeSecretName", "kubeSecretKey", "kubeSecretNS")
+
+	// From exact keys
+	for k := range r.CopyLabelKeys {
+		if v, ok := sec.Labels[k]; ok {
+			ck := toCamel(k)
+			if !reserved.Has(ck) {
+				defaultValues[ck] = v
+			}
+		}
+	}
+	// From prefixes
+	for k, v := range sec.Labels {
+		if hasAnyPrefix(r.CopyLabelPrefixes, k) {
+			ck := toCamel(k)
+			if !reserved.Has(ck) {
+				defaultValues[ck] = v
+			}
+		}
+	}
+
 	spec := map[string]any{
-		"type": "Static",
-		"defaultValues": map[string]any{
-			"name":           clusterName,
-			"project":        project, // NEW
-			"kubeSecretName": sec.Name,
-			"kubeSecretKey":  r.SecretKey,
-			"kubeSecretNS":   sec.Namespace,
-		},
+		"type":          "Static",
+		"defaultValues": defaultValues,
 	}
 	_ = unstructured.SetNestedField(desired.Object, spec, "spec")
+	// ---------------------------------------------------------------
 
 	// Create/Update
 	var existing unstructured.Unstructured
@@ -562,4 +587,44 @@ func mapsEqual(a, b map[string]any) bool {
 		}
 	}
 	return true
+}
+
+// toCamel converts label keys like "flux-app/podinfo", "team-name", "env.region"
+// into "fluxAppPodinfo", "teamName", "envRegion". Non-alnum are treated as separators.
+func toCamel(s string) string {
+	if s == "" {
+		return s
+	}
+	// Replace common separators with spaces, then title-case chunks and join.
+	sep := func(r rune) bool {
+		switch r {
+		case '-', '_', '.', '/', ':':
+			return true
+		default:
+			return false
+		}
+	}
+	parts := strings.FieldsFunc(s, sep)
+	if len(parts) == 0 {
+		return s
+	}
+	for i := range parts {
+		parts[i] = strings.TrimSpace(parts[i])
+	}
+	// first chunk lowerCamel, others TitleCase
+	out := strings.ToLower(parts[0])
+	for _, p := range parts[1:] {
+		if p == "" {
+			continue
+		}
+		out += strings.ToUpper(p[:1]) + strings.ToLower(p[1:])
+	}
+	// strip non-alnum (just in case)
+	clean := strings.Builder{}
+	for _, r := range out {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			clean.WriteRune(r)
+		}
+	}
+	return clean.String()
 }
