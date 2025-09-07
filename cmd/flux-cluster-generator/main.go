@@ -1,10 +1,4 @@
-// main.go
-// Mirrors matching Secrets -> Flux ResourceSetInputProviders (RSIPs).
-// Changes from your version:
-//   * RSIP name includes the VCI project: "<prefix><project>-<clusterName>"
-//   * RSIP spec.defaultValues now includes "project"
-//   * RSIPs are labeled with mirror.fluxcd.io/project=<project>
-
+// cmd/flux-cluster-generator/main.go
 package main
 
 import (
@@ -33,6 +27,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -67,7 +62,7 @@ func main() {
 	flag.StringVar(&watchNamespacesCSV, "watch-namespaces", "", "Comma-separated namespaces to watch for Secrets. Empty = all namespaces")
 	flag.StringVar(&rsipNamespace, "rsip-namespace", "flux-apps", "Namespace to create RSIPs in")
 	flag.StringVar(&labelSelectorStr, "label-selector", "", "Label selector for source Secrets, e.g. env=dev,team=payments,fluxcd.io/secret-type=cluster")
-	flag.StringVar(&secretKey, "secret-key", "config", "Key in the Secret.data that contains the kubeconfig")
+	flag.StringVar(&secretKey, "secret-key", "config", "Key in Secret.data that contains the kubeconfig")
 	flag.StringVar(&rsipNamePrefix, "rsip-name-prefix", "inputs-", "Prefix for generated RSIP names")
 	flag.StringVar(&clusterNameKey, "cluster-name-label-key", "vci.flux.loft.sh/name", "Label key on the Secret to derive cluster name; fallback to Secret name")
 	flag.StringVar(&projectLabelKey, "project-label-key", "vci.flux.loft.sh/project", "Label key on the Secret containing the VCI project")
@@ -113,17 +108,17 @@ func main() {
 	allowedNS := newThreadSafeSet()
 
 	reconciler := &SecretMirrorReconciler{
-		Client:             c,
-		APIReader:          apiReader,
-		RSIPNamespace:      rsipNamespace,
-		Selector:           secSel,
-		SecretKey:          secretKey,
-		RSIPNamePrefix:     rsipNamePrefix,
-		ClusterNameKey:     clusterNameKey,
-		ProjectLabelKey:    projectLabelKey,
-		CopyLabelKeys:      copyLabelKeys,
-		CopyLabelPrefixes:  copyLabelPrefixes,
-		AllowedNS:          allowedNS,
+		Client:            c,
+		APIReader:         apiReader,
+		RSIPNamespace:     rsipNamespace,
+		Selector:          secSel,
+		SecretKey:         secretKey,
+		RSIPNamePrefix:    rsipNamePrefix,
+		ClusterNameKey:    clusterNameKey,
+		ProjectLabelKey:   projectLabelKey,
+		CopyLabelKeys:     copyLabelKeys,
+		CopyLabelPrefixes: copyLabelPrefixes,
+		AllowedNS:         allowedNS,
 	}
 
 	// Namespace allowlist maintenance
@@ -154,7 +149,13 @@ func main() {
 		logger.Info("seeded allowed namespaces", "count", len(allowedNS.m))
 	}
 
-	nsPred := predicateNS(nsSel)
+	// Namespace controller
+	nsPred := predicate.Funcs{
+		CreateFunc: func(e event.CreateEvent) bool { return nsSel.Matches(labels.Set(e.Object.GetLabels())) },
+		UpdateFunc: func(e event.UpdateEvent) bool { return nsSel.Matches(labels.Set(e.ObjectNew.GetLabels())) },
+		DeleteFunc: func(e event.DeleteEvent) bool { return true },
+		GenericFunc: func(e event.GenericEvent) bool { return nsSel.Matches(labels.Set(e.Object.GetLabels())) },
+	}
 	if err := ctrl.NewControllerManagedBy(mgr).
 		For(&corev1.Namespace{}, builder.WithPredicates(nsPred)).
 		WithOptions(controller.Options{MaxConcurrentReconciles: 1}).
@@ -169,8 +170,26 @@ func main() {
 		watchNS.Insert(strings.TrimSpace(ns))
 	}
 
-	// Secret controller
-	secretPred := predicateSecret(watchNS, secSel, allowedNS)
+	// Secret controller (allow deletes for cleanup)
+	secretPred := predicate.Funcs{
+		CreateFunc: func(e event.CreateEvent) bool {
+			return (watchNS.Len() == 0 || watchNS.Has(e.Object.GetNamespace())) &&
+				secSel.Matches(labels.Set(e.Object.GetLabels())) &&
+				allowedNS.Has(e.Object.GetNamespace())
+		},
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			return (watchNS.Len() == 0 || watchNS.Has(e.ObjectNew.GetNamespace())) &&
+				secSel.Matches(labels.Set(e.ObjectNew.GetLabels())) &&
+				allowedNS.Has(e.ObjectNew.GetNamespace())
+		},
+		DeleteFunc: func(e event.DeleteEvent) bool { return true },
+		GenericFunc: func(e event.GenericEvent) bool {
+			return (watchNS.Len() == 0 || watchNS.Has(e.Object.GetNamespace())) &&
+				secSel.Matches(labels.Set(e.Object.GetLabels())) &&
+				allowedNS.Has(e.Object.GetNamespace())
+		},
+	}
+
 	if err := ctrl.NewControllerManagedBy(mgr).
 		For(&corev1.Secret{}, builder.WithPredicates(secretPred)).
 		WithOptions(controller.Options{
@@ -219,22 +238,22 @@ func main() {
 
 type SecretMirrorReconciler struct {
 	client.Client
-	APIReader          client.Reader
-	RSIPNamespace      string
-	Selector           labels.Selector
-	SecretKey          string
-	RSIPNamePrefix     string
-	ClusterNameKey     string
-	ProjectLabelKey    string
-	CopyLabelKeys      sets.Set[string]
-	CopyLabelPrefixes  []string
-	AllowedNS          *threadSafeSet
+	APIReader         client.Reader
+	RSIPNamespace     string
+	Selector          labels.Selector
+	SecretKey         string
+	RSIPNamePrefix    string
+	ClusterNameKey    string
+	ProjectLabelKey   string
+	CopyLabelKeys     sets.Set[string]
+	CopyLabelPrefixes []string
+	AllowedNS         *threadSafeSet
 }
 
 func (r *SecretMirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := ctrl.Log.WithName("reconcile").WithValues("secret", types.NamespacedName{Name: req.Name, Namespace: req.Namespace})
 
-	// Load the Secret (if gone: clean up RSIP(s) by labels)
+	// Load Secret; if gone, delete RSIP(s) by labels
 	var sec corev1.Secret
 	if err := r.Get(ctx, req.NamespacedName, &sec); err != nil {
 		return ctrl.Result{}, r.ensureRSIPAbsence(ctx, req.NamespacedName)
@@ -251,7 +270,7 @@ func (r *SecretMirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, nil
 	}
 
-	// Derive names/ids
+	// Names/ids
 	clusterName := sec.Labels[r.ClusterNameKey]
 	if clusterName == "" {
 		clusterName = sec.Name
@@ -263,7 +282,7 @@ func (r *SecretMirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	project := strings.TrimSpace(sec.Labels[r.ProjectLabelKey])
 	if project == "" {
-		project = projectFromNamespace(sec.Namespace) // best-effort fallback
+		project = projectFromNamespace(sec.Namespace)
 	}
 	project = sanitizeDNS1123(project)
 
@@ -281,20 +300,20 @@ func (r *SecretMirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	desired.SetName(rsipName)
 
 	labelsToApply := map[string]string{
-		"mirror.fluxcd.io/managed":    "true",
-		"mirror.fluxcd.io/secretNS":   sec.Namespace,
-		"mirror.fluxcd.io/secretName": sec.Name,
-		"mirror.fluxcd.io/secretKey":  r.SecretKey,
+		"mirror.fluxcd.io/managed":     "true",
+		"mirror.fluxcd.io/secretNS":    sec.Namespace,
+		"mirror.fluxcd.io/secretName":  sec.Name,
+		"mirror.fluxcd.io/secretKey":   r.SecretKey,
 		"mirror.fluxcd.io/clusterName": clusterName,
 		"mirror.fluxcd.io/project":     project,
 	}
-	// Copy exact keys
+	// Exact label keys
 	for k := range r.CopyLabelKeys {
 		if v, ok := sec.Labels[k]; ok {
 			labelsToApply[k] = v
 		}
 	}
-	// Copy prefixes
+	// Prefixed labels
 	for k, v := range sec.Labels {
 		if hasAnyPrefix(r.CopyLabelPrefixes, k) {
 			labelsToApply[k] = v
@@ -306,7 +325,7 @@ func (r *SecretMirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		"type": "Static",
 		"defaultValues": map[string]any{
 			"name":           clusterName,
-			"project":        project,      // <-- NEW
+			"project":        project, // NEW
 			"kubeSecretName": sec.Name,
 			"kubeSecretKey":  r.SecretKey,
 			"kubeSecretNS":   sec.Namespace,
@@ -346,6 +365,8 @@ func (r *SecretMirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request
 }
 
 func (r *SecretMirrorReconciler) ensureRSIPAbsence(ctx context.Context, secretNN types.NamespacedName) error {
+	log := ctrl.Log.WithName("gc")
+
 	// List by labels (works even when the Secret is already gone)
 	var list unstructured.UnstructuredList
 	list.SetGroupVersionKind(schema.GroupVersionKind{
@@ -360,13 +381,17 @@ func (r *SecretMirrorReconciler) ensureRSIPAbsence(ctx context.Context, secretNN
 	); err != nil {
 		return err
 	}
+
 	if len(list.Items) == 0 {
-		ctrl.Log.WithName("gc").Info("no RSIPs found for deleted/ignored secret", "secret", secretNN.String(), "rsipNS", r.RSIPNamespace)
+		log.Info("no RSIPs found for deleted/ignored secret", "secret", secretNN.String(), "rsipNS", r.RSIPNamespace)
 		return nil
 	}
 	for i := range list.Items {
-		_ = r.Delete(ctx, &list.Items[i]) // IgnoreNotFound implicitly ok on delete
-		ctrl.Log.WithName("gc").Info("deleted RSIP", "name", list.Items[i].GetName())
+		if err := r.Delete(ctx, &list.Items[i]); client.IgnoreNotFound(err) != nil {
+			log.Error(err, "delete RSIP failed", "name", list.Items[i].GetName())
+		} else {
+			log.Info("deleted RSIP", "name", list.Items[i].GetName())
+		}
 	}
 	return nil
 }
@@ -383,16 +408,19 @@ func boolPtr(b bool) *bool { return &b }
 func newThreadSafeSet() *threadSafeSet { return &threadSafeSet{m: map[string]struct{}{}} }
 
 func (s *threadSafeSet) Has(k string) bool {
-	s.mu.RLock(); defer s.mu.RUnlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	_, ok := s.m[k]
 	return ok
 }
 func (s *threadSafeSet) Add(k string) {
-	s.mu.Lock(); defer s.mu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.m[k] = struct{}{}
 }
 func (s *threadSafeSet) Delete(k string) {
-	s.mu.Lock(); defer s.mu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	delete(s.m, k)
 }
 
@@ -405,6 +433,7 @@ type NamespaceSetReconciler struct {
 func (r *NamespaceSetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var ns corev1.Namespace
 	if err := r.Get(ctx, req.NamespacedName, &ns); err != nil {
+		// remove on delete/not found
 		r.AllowedNS.Delete(req.Name)
 		return ctrl.Result{}, nil
 	}
@@ -414,38 +443,6 @@ func (r *NamespaceSetReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		r.AllowedNS.Delete(ns.Name)
 	}
 	return ctrl.Result{}, nil
-}
-
-func predicateNS(nsSel labels.Selector) builder.Predicates {
-	return builder.WithPredicates(predicate.Funcs{
-		CreateFunc: func(e event.CreateEvent) bool { return nsSel.Matches(labels.Set(e.Object.GetLabels())) },
-		UpdateFunc: func(e event.UpdateEvent) bool { return nsSel.Matches(labels.Set(e.ObjectNew.GetLabels())) },
-		DeleteFunc: func(e event.DeleteEvent) bool { return true },
-		GenericFunc: func(e event.GenericEvent) bool {
-			return nsSel.Matches(labels.Set(e.Object.GetLabels()))
-		},
-	})
-}
-
-func predicateSecret(watchNS sets.Set[string], secSel labels.Selector, allowedNS *threadSafeSet) builder.Predicates {
-	return builder.WithPredicates(predicate.Funcs{
-		CreateFunc: func(e event.CreateEvent) bool {
-			return (watchNS.Len() == 0 || watchNS.Has(e.Object.GetNamespace())) &&
-				secSel.Matches(labels.Set(e.Object.GetLabels())) &&
-				allowedNS.Has(e.Object.GetNamespace())
-		},
-		UpdateFunc: func(e event.UpdateEvent) bool {
-			return (watchNS.Len() == 0 || watchNS.Has(e.ObjectNew.GetNamespace())) &&
-				secSel.Matches(labels.Set(e.ObjectNew.GetLabels())) &&
-				allowedNS.Has(e.ObjectNew.GetNamespace())
-		},
-		DeleteFunc: func(e event.DeleteEvent) bool { return true }, // allow cleanup
-		GenericFunc: func(e event.GenericEvent) bool {
-			return (watchNS.Len() == 0 || watchNS.Has(e.Object.GetNamespace())) &&
-				secSel.Matches(labels.Set(e.Object.GetLabels())) &&
-				allowedNS.Has(e.Object.GetNamespace())
-		},
-	})
 }
 
 func sweepOrphanRSIPs(
@@ -537,4 +534,32 @@ func projectFromNamespace(ns string) string {
 		return ns[2:]
 	}
 	return ""
+}
+
+// Deep compare two map[string]any (used for spec drift)
+func mapsEqual(a, b map[string]any) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, va := range a {
+		vb, ok := b[k]
+		if !ok {
+			return false
+		}
+		switch at := va.(type) {
+		case map[string]any:
+			bt, ok := vb.(map[string]any)
+			if !ok {
+				return false
+			}
+			if !mapsEqual(at, bt) {
+				return false
+			}
+		default:
+			if fmt.Sprintf("%v", va) != fmt.Sprintf("%v", vb) {
+				return false
+			}
+		}
+	}
+	return true
 }
