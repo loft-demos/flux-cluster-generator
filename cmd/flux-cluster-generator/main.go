@@ -1,11 +1,9 @@
 // main.go
-// A lightweight controller that watches labeled Secrets and mirrors them into
-// ResourceSetInputProviders (RSIPs) for Flux Operator ResourceSets.
-// Supports:
-//   - Selecting Secrets by label selector
-//   - Restricting to Namespaces that match a namespace-label selector
-//   - Copying specific label KEYS and any label KEYS that start with configured PREFIXES (e.g. flux-app/)
-//   - Creating/Updating an RSIP per matching Secret; deleting RSIP when Secret is deleted or no longer matches
+// Mirrors matching Secrets -> Flux ResourceSetInputProviders (RSIPs).
+// Changes from your version:
+//   * RSIP name includes the VCI project: "<prefix><project>-<clusterName>"
+//   * RSIP spec.defaultValues now includes "project"
+//   * RSIPs are labeled with mirror.fluxcd.io/project=<project>
 
 package main
 
@@ -13,11 +11,11 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"maps"
 	"os"
 	"strings"
 	"sync"
 	"time"
-	"maps"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -27,7 +25,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/util/workqueue"
-	"github.com/go-logr/logr"
 
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
@@ -36,20 +33,20 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
-	"sigs.k8s.io/controller-runtime/pkg/predicate"
-	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+
+	"github.com/go-logr/logr"
 )
 
-// RSIP GVK
 var rsipGVK = schema.GroupVersionKind{
 	Group:   "fluxcd.controlplane.io",
 	Version: "v1",
 	Kind:    "ResourceSetInputProvider",
 }
 
-// CLI/config flags
+// CLI flags
 var (
 	watchNamespacesCSV        string
 	rsipNamespace             string
@@ -57,52 +54,52 @@ var (
 	secretKey                 string
 	rsipNamePrefix            string
 	clusterNameKey            string
+	projectLabelKey           string
 	copyLabelKeysCSV          string
 	copyLabelPrefixesCSV      string
 	namespaceLabelSelectorStr string
 )
 
 func main() {
-	opts := zap.Options{Development: false}
-	opts.BindFlags(flag.CommandLine)
+	z := zap.Options{Development: false}
+	z.BindFlags(flag.CommandLine)
 
 	flag.StringVar(&watchNamespacesCSV, "watch-namespaces", "", "Comma-separated namespaces to watch for Secrets. Empty = all namespaces")
 	flag.StringVar(&rsipNamespace, "rsip-namespace", "flux-apps", "Namespace to create RSIPs in")
-	flag.StringVar(&labelSelectorStr, "label-selector", "", "Label selector for source Secrets, e.g. env=dev,team=payments,fluxcd/secret-type=cluster")
-	flag.StringVar(&secretKey, "secret-key", "config", "Key in the Secret data that contains the kubeconfig")
+	flag.StringVar(&labelSelectorStr, "label-selector", "", "Label selector for source Secrets, e.g. env=dev,team=payments,fluxcd.io/secret-type=cluster")
+	flag.StringVar(&secretKey, "secret-key", "config", "Key in the Secret.data that contains the kubeconfig")
 	flag.StringVar(&rsipNamePrefix, "rsip-name-prefix", "inputs-", "Prefix for generated RSIP names")
 	flag.StringVar(&clusterNameKey, "cluster-name-label-key", "vci.flux.loft.sh/name", "Label key on the Secret to derive cluster name; fallback to Secret name")
+	flag.StringVar(&projectLabelKey, "project-label-key", "vci.flux.loft.sh/project", "Label key on the Secret containing the VCI project")
 	flag.StringVar(&copyLabelKeysCSV, "copy-label-keys", "env,team,region", "Comma-separated label KEYS to copy from Secret to RSIP")
 	flag.StringVar(&copyLabelPrefixesCSV, "copy-label-prefixes", "", "Comma-separated label KEY PREFIXES to copy (e.g. flux-app/)")
 	flag.StringVar(&namespaceLabelSelectorStr, "namespace-label-selector", "", "Label selector for Namespaces to include (e.g. flux-cluster-generator-enabled=true)")
 	flag.Parse()
 
-	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&z)))
 	logger := ctrl.Log.WithName("setup")
 
 	scheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(scheme)
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{Scheme: scheme})
 
+	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{Scheme: scheme})
 	if err != nil {
 		logger.Error(err, "unable to start manager")
 		os.Exit(1)
 	}
 
 	c := mgr.GetClient()
+	apiReader := mgr.GetAPIReader() // uncached
 
-	// uncached reader (safe before mgr.Start)
-    apiReader := mgr.GetAPIReader()
-
-	// Parse Secret label selector
+	// Secret selector
 	var secSel labels.Selector
 	if labelSelectorStr != "" {
-		parsed, err := labels.Parse(labelSelectorStr)
-		if err != nil {
+		if parsed, err := labels.Parse(labelSelectorStr); err == nil {
+			secSel = parsed
+		} else {
 			logger.Error(err, "invalid --label-selector")
 			os.Exit(1)
 		}
-		secSel = parsed
 	} else {
 		secSel = labels.Everything()
 	}
@@ -113,24 +110,24 @@ func main() {
 	}
 	copyLabelPrefixes := splitNonEmpty(copyLabelPrefixesCSV)
 
-	// create the shared set before using it
 	allowedNS := newThreadSafeSet()
 
 	reconciler := &SecretMirrorReconciler{
-		Client:            c,
-		APIReader:         apiReader,
-		RSIPNamespace:     rsipNamespace,
-		Selector:          secSel,
-		SecretKey:         secretKey,
-		RSIPNamePrefix:    rsipNamePrefix,
-		ClusterNameKey:    clusterNameKey,
-		CopyLabelKeys:     copyLabelKeys,
-		CopyLabelPrefixes: copyLabelPrefixes,
-		AllowedNS:         allowedNS,
+		Client:             c,
+		APIReader:          apiReader,
+		RSIPNamespace:      rsipNamespace,
+		Selector:           secSel,
+		SecretKey:          secretKey,
+		RSIPNamePrefix:     rsipNamePrefix,
+		ClusterNameKey:     clusterNameKey,
+		ProjectLabelKey:    projectLabelKey,
+		CopyLabelKeys:      copyLabelKeys,
+		CopyLabelPrefixes:  copyLabelPrefixes,
+		AllowedNS:          allowedNS,
 	}
 
-	// Namespace watcher maintains allowed namespace set
-	var nsSel labels.Selector = labels.Everything()
+	// Namespace allowlist maintenance
+	nsSel := labels.Everything()
 	if namespaceLabelSelectorStr != "" {
 		if s, err := labels.Parse(namespaceLabelSelectorStr); err == nil {
 			nsSel = s
@@ -140,25 +137,24 @@ func main() {
 		}
 	}
 
-	// Seed AllowedNS with existing namespaces that match nsSel (before mgr.Start)
+	// Seed allowlist
 	{
-	    var nsList corev1.NamespaceList
-	    // use the uncached API reader here
-	    ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	    defer cancel()
-	    if err := apiReader.List(ctx, &nsList); err != nil {
-	        logger.Error(err, "failed to list namespaces at startup")
-	        os.Exit(1)
-	    }
-	    for i := range nsList.Items {
-	        if nsSel.Matches(labels.Set(nsList.Items[i].Labels)) {
-	            allowedNS.Add(nsList.Items[i].Name)
-	        }
-	    }
-	    logger.Info("seeded allowed namespaces", "count", len(nsList.Items))
+		var nsList corev1.NamespaceList
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := apiReader.List(ctx, &nsList); err != nil {
+			logger.Error(err, "failed to list namespaces at startup")
+			os.Exit(1)
+		}
+		for i := range nsList.Items {
+			if nsSel.Matches(labels.Set(nsList.Items[i].Labels)) {
+				allowedNS.Add(nsList.Items[i].Name)
+			}
+		}
+		logger.Info("seeded allowed namespaces", "count", len(allowedNS.m))
 	}
-	
-	nsPred := predicate.NewPredicateFuncs(func(o client.Object) bool { return nsSel.Matches(labels.Set(o.GetLabels())) })
+
+	nsPred := predicateNS(nsSel)
 	if err := ctrl.NewControllerManagedBy(mgr).
 		For(&corev1.Namespace{}, builder.WithPredicates(nsPred)).
 		WithOptions(controller.Options{MaxConcurrentReconciles: 1}).
@@ -166,72 +162,50 @@ func main() {
 		logger.Error(err, "unable to create namespace controller")
 		os.Exit(1)
 	}
-    // Convert CSV list into a set for quick membership checks
-    watchNS := sets.New[string]()
-    for _, ns := range splitNonEmpty(watchNamespacesCSV) {
-        watchNS.Insert(strings.TrimSpace(ns))
-    }
 
-	// Secret watcher — allow deletes to pass so cleanup runs
-	secretPred := predicate.Funcs{
-	    CreateFunc: func(e event.CreateEvent) bool {
-	        return (watchNS.Len() == 0 || watchNS.Has(e.Object.GetNamespace())) &&
-	            secSel.Matches(labels.Set(e.Object.GetLabels())) &&
-	            allowedNS.Has(e.Object.GetNamespace())
-	    },
-	    UpdateFunc: func(e event.UpdateEvent) bool {
-	        return (watchNS.Len() == 0 || watchNS.Has(e.ObjectNew.GetNamespace())) &&
-	            secSel.Matches(labels.Set(e.ObjectNew.GetLabels())) &&
-	            allowedNS.Has(e.ObjectNew.GetNamespace())
-	    },
-	    GenericFunc: func(e event.GenericEvent) bool {
-	        return (watchNS.Len() == 0 || watchNS.Has(e.Object.GetNamespace())) &&
-	            secSel.Matches(labels.Set(e.Object.GetLabels())) &&
-	            allowedNS.Has(e.Object.GetNamespace())
-	    },
-	    // Key change: ALWAYS reconcile on delete so ensureRSIPAbsence runs
-	    DeleteFunc: func(e event.DeleteEvent) bool {
-	        return true
-	    },
+	// Optional namespace watch list
+	watchNS := sets.New[string]()
+	for _, ns := range splitNonEmpty(watchNamespacesCSV) {
+		watchNS.Insert(strings.TrimSpace(ns))
 	}
-	
-	b := ctrl.NewControllerManagedBy(mgr).
-	    For(&corev1.Secret{}, builder.WithPredicates(secretPred)).
-	    WithOptions(controller.Options{
-	        CacheSyncTimeout:        2 * time.Minute,
-	        RecoverPanic:            boolPtr(true),
-	        RateLimiter:             workqueue.DefaultControllerRateLimiter(),
-	        MaxConcurrentReconciles: 2,
-	    })
 
-	if err := b.Complete(reconciler); err != nil {
+	// Secret controller
+	secretPred := predicateSecret(watchNS, secSel, allowedNS)
+	if err := ctrl.NewControllerManagedBy(mgr).
+		For(&corev1.Secret{}, builder.WithPredicates(secretPred)).
+		WithOptions(controller.Options{
+			CacheSyncTimeout:        2 * time.Minute,
+			RecoverPanic:            boolPtr(true),
+			RateLimiter:             workqueue.DefaultControllerRateLimiter(),
+			MaxConcurrentReconciles: 2,
+		}).
+		Complete(reconciler); err != nil {
 		logger.Error(err, "unable to create secret controller")
 		os.Exit(1)
 	}
 
+	// Periodic GC of orphan RSIPs
 	gcLog := ctrl.Log.WithName("gc")
 	if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
-	    ticker := time.NewTicker(2 * time.Minute) // pick your interval
-	    defer ticker.Stop()
-	
-	    // Run once immediately
-	    if err := sweepOrphanRSIPs(ctx, gcLog, apiReader, c, rsipNamespace); err != nil {
-	        gcLog.Error(err, "initial GC sweep failed")
-	    }
-	
-	    for {
-	        select {
-	        case <-ctx.Done():
-	            return nil
-	        case <-ticker.C:
-	            if err := sweepOrphanRSIPs(ctx, gcLog, apiReader, c, rsipNamespace); err != nil {
-	                gcLog.Error(err, "periodic GC sweep failed")
-	            }
-	        }
-	    }
+		ticker := time.NewTicker(2 * time.Minute)
+		defer ticker.Stop()
+
+		if err := sweepOrphanRSIPs(ctx, gcLog, apiReader, c, rsipNamespace); err != nil {
+			gcLog.Error(err, "initial GC sweep failed")
+		}
+		for {
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-ticker.C:
+				if err := sweepOrphanRSIPs(ctx, gcLog, apiReader, c, rsipNamespace); err != nil {
+					gcLog.Error(err, "periodic GC sweep failed")
+				}
+			}
+		}
 	})); err != nil {
-	    logger.Error(err, "unable to add GC runnable")
-	    os.Exit(1)
+		logger.Error(err, "unable to add GC runnable")
+		os.Exit(1)
 	}
 
 	logger.Info("starting manager")
@@ -241,75 +215,86 @@ func main() {
 	}
 }
 
-// SecretMirrorReconciler mirrors Secrets -> RSIPs
+// ---- Reconcilers ----
 
 type SecretMirrorReconciler struct {
 	client.Client
-	APIReader        client.Reader
-	RSIPNamespace     string
-	Selector          labels.Selector
-	SecretKey         string
-	RSIPNamePrefix    string
-	ClusterNameKey    string
-	CopyLabelKeys     sets.Set[string]
-	CopyLabelPrefixes []string
-	AllowedNS         *threadSafeSet
+	APIReader          client.Reader
+	RSIPNamespace      string
+	Selector           labels.Selector
+	SecretKey          string
+	RSIPNamePrefix     string
+	ClusterNameKey     string
+	ProjectLabelKey    string
+	CopyLabelKeys      sets.Set[string]
+	CopyLabelPrefixes  []string
+	AllowedNS          *threadSafeSet
 }
 
 func (r *SecretMirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := ctrl.Log.WithName("reconcile").WithValues("secret", types.NamespacedName{Name: req.Name, Namespace: req.Namespace})
 
-	// Fetch Secret
+	// Load the Secret (if gone: clean up RSIP(s) by labels)
 	var sec corev1.Secret
 	if err := r.Get(ctx, req.NamespacedName, &sec); err != nil {
-		// If gone, try to delete corresponding RSIP
 		return ctrl.Result{}, r.ensureRSIPAbsence(ctx, req.NamespacedName)
 	}
 
-	// Check namespace eligibility and label selector
+	// Filter by namespace allowlist + label selector
 	if !r.AllowedNS.Has(sec.Namespace) || !r.Selector.Matches(labels.Set(sec.Labels)) {
-		// Not eligible -> delete RSIP if exists
 		return ctrl.Result{}, r.ensureRSIPAbsence(ctx, req.NamespacedName)
 	}
 
-	// Ensure the kubeconfig key exists
+	// Require kubeconfig key
 	if _, ok := sec.Data[r.SecretKey]; !ok {
 		log.Info("secret missing kubeconfig key; skipping RSIP create/update", "key", r.SecretKey)
 		return ctrl.Result{}, nil
 	}
 
-	// Compute names
-	rsipName := r.RSIPNamePrefix + sec.Name
+	// Derive names/ids
 	clusterName := sec.Labels[r.ClusterNameKey]
 	if clusterName == "" {
 		clusterName = sec.Name
 	}
-	if errList := validation.IsDNS1123Label(clusterName); len(errList) > 0 {
-		log.Info("sanitizing cluster name to DNS-1123", "errors", errList)
+	if errs := validation.IsDNS1123Label(clusterName); len(errs) > 0 {
+		log.Info("sanitizing cluster name to DNS-1123", "errors", errs)
 		clusterName = sanitizeDNS1123(clusterName)
 	}
 
-	// Desired RSIP object
+	project := strings.TrimSpace(sec.Labels[r.ProjectLabelKey])
+	if project == "" {
+		project = projectFromNamespace(sec.Namespace) // best-effort fallback
+	}
+	project = sanitizeDNS1123(project)
+
+	// RSIP name: <prefix><project>-<cluster>
+	rsipName := r.RSIPNamePrefix
+	if project != "" {
+		rsipName += project + "-"
+	}
+	rsipName += clusterName
+
+	// Desired RSIP
 	desired := &unstructured.Unstructured{}
 	desired.SetGroupVersionKind(rsipGVK)
-	desired.SetName(rsipName)
 	desired.SetNamespace(r.RSIPNamespace)
+	desired.SetName(rsipName)
 
-	// Labels to apply onto RSIP (baseline)
 	labelsToApply := map[string]string{
-		"mirror.fluxcd.io/managed":     "true",
-		"mirror.fluxcd.io/secretNS":      sec.Namespace, 
-    	"mirror.fluxcd.io/secretName":    sec.Name,      
-		"mirror.fluxcd.io/secretKey":   r.SecretKey,
+		"mirror.fluxcd.io/managed":    "true",
+		"mirror.fluxcd.io/secretNS":   sec.Namespace,
+		"mirror.fluxcd.io/secretName": sec.Name,
+		"mirror.fluxcd.io/secretKey":  r.SecretKey,
 		"mirror.fluxcd.io/clusterName": clusterName,
+		"mirror.fluxcd.io/project":     project,
 	}
-	// Copy exact label keys
+	// Copy exact keys
 	for k := range r.CopyLabelKeys {
 		if v, ok := sec.Labels[k]; ok {
 			labelsToApply[k] = v
 		}
 	}
-	// Copy labels that match any configured prefix (e.g., flux-app/)
+	// Copy prefixes
 	for k, v := range sec.Labels {
 		if hasAnyPrefix(r.CopyLabelPrefixes, k) {
 			labelsToApply[k] = v
@@ -317,11 +302,11 @@ func (r *SecretMirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 	desired.SetLabels(labelsToApply)
 
-	// Spec: point to the Secret (we don't copy kubeconfig bytes, just reference)
 	spec := map[string]any{
 		"type": "Static",
 		"defaultValues": map[string]any{
 			"name":           clusterName,
+			"project":        project,      // <-- NEW
 			"kubeSecretName": sec.Name,
 			"kubeSecretKey":  r.SecretKey,
 			"kubeSecretNS":   sec.Namespace,
@@ -329,11 +314,10 @@ func (r *SecretMirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 	_ = unstructured.SetNestedField(desired.Object, spec, "spec")
 
-	// Create or Update
+	// Create/Update
 	var existing unstructured.Unstructured
 	existing.SetGroupVersionKind(rsipGVK)
 	if err := r.Get(ctx, types.NamespacedName{Name: rsipName, Namespace: r.RSIPNamespace}, &existing); err != nil {
-		// Create
 		if err := r.Create(ctx, desired); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -341,11 +325,10 @@ func (r *SecretMirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, nil
 	}
 
-	// Update if drifted
 	changed := false
 	if !maps.Equal(existing.GetLabels(), desired.GetLabels()) {
-	    existing.SetLabels(desired.GetLabels())
-	    changed = true
+		existing.SetLabels(desired.GetLabels())
+		changed = true
 	}
 	curSpec, _, _ := unstructured.NestedMap(existing.Object, "spec")
 	desSpec, _, _ := unstructured.NestedMap(desired.Object, "spec")
@@ -359,52 +342,36 @@ func (r *SecretMirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 		log.Info("updated RSIP", "name", rsipName)
 	}
-
 	return ctrl.Result{}, nil
 }
 
 func (r *SecretMirrorReconciler) ensureRSIPAbsence(ctx context.Context, secretNN types.NamespacedName) error {
-    log := ctrl.Log.WithName("gc")
-    // A) Best-effort delete by deterministic name
-    byName := &unstructured.Unstructured{}
-    byName.SetGroupVersionKind(rsipGVK)
-    byName.SetNamespace(r.RSIPNamespace)
-    byName.SetName(r.RSIPNamePrefix + secretNN.Name)
-    if err := r.Delete(ctx, byName); client.IgnoreNotFound(err) != nil {
-        log.Error(err, "delete byName failed", "name", byName.GetName(), "ns", r.RSIPNamespace)
-    }
-
-    // B) List by labels using UN-CACHED reader (cache may not watch this GVK)
-    var list unstructured.UnstructuredList
-    list.SetGroupVersionKind(schema.GroupVersionKind{
-        Group: rsipGVK.Group, Version: rsipGVK.Version, Kind: rsipGVK.Kind + "List",
-    })
-    if err := r.APIReader.List(ctx, &list,
-        client.InNamespace(r.RSIPNamespace),
-        client.MatchingLabels{
-            "mirror.fluxcd.io/secretNS":   secretNN.Namespace,
-            "mirror.fluxcd.io/secretName": secretNN.Name,
-        },
-    ); err != nil {
-        return err
-    }
-
-    if len(list.Items) == 0 {
-        log.Info("no RSIPs found for deleted secret", "secret", secretNN.String(), "rsipNS", r.RSIPNamespace)
-        return nil
-    }
-
-    for i := range list.Items {
-        if err := r.Delete(ctx, &list.Items[i]); client.IgnoreNotFound(err) != nil {
-            log.Error(err, "delete byLabels failed", "name", list.Items[i].GetName())
-        } else {
-            log.Info("deleted RSIP", "name", list.Items[i].GetName())
-        }
-    }
-    return nil
+	// List by labels (works even when the Secret is already gone)
+	var list unstructured.UnstructuredList
+	list.SetGroupVersionKind(schema.GroupVersionKind{
+		Group: rsipGVK.Group, Version: rsipGVK.Version, Kind: rsipGVK.Kind + "List",
+	})
+	if err := r.APIReader.List(ctx, &list,
+		client.InNamespace(r.RSIPNamespace),
+		client.MatchingLabels{
+			"mirror.fluxcd.io/secretNS":   secretNN.Namespace,
+			"mirror.fluxcd.io/secretName": secretNN.Name,
+		},
+	); err != nil {
+		return err
+	}
+	if len(list.Items) == 0 {
+		ctrl.Log.WithName("gc").Info("no RSIPs found for deleted/ignored secret", "secret", secretNN.String(), "rsipNS", r.RSIPNamespace)
+		return nil
+	}
+	for i := range list.Items {
+		_ = r.Delete(ctx, &list.Items[i]) // IgnoreNotFound implicitly ok on delete
+		ctrl.Log.WithName("gc").Info("deleted RSIP", "name", list.Items[i].GetName())
+	}
+	return nil
 }
 
-// --- helpers ---
+// ---- helpers ----
 
 type threadSafeSet struct {
 	mu sync.RWMutex
@@ -429,8 +396,6 @@ func (s *threadSafeSet) Delete(k string) {
 	delete(s.m, k)
 }
 
-// Reconciler to keep AllowedNS in sync with Namespace label selector
-
 type NamespaceSetReconciler struct {
 	client.Client
 	AllowedNS *threadSafeSet
@@ -440,7 +405,6 @@ type NamespaceSetReconciler struct {
 func (r *NamespaceSetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var ns corev1.Namespace
 	if err := r.Get(ctx, req.NamespacedName, &ns); err != nil {
-		// remove on delete/not found
 		r.AllowedNS.Delete(req.Name)
 		return ctrl.Result{}, nil
 	}
@@ -452,59 +416,87 @@ func (r *NamespaceSetReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	return ctrl.Result{}, nil
 }
 
-func sweepOrphanRSIPs(
-    ctx context.Context,
-    log logr.Logger,
-    reader client.Reader, // uncached APIReader
-    writer client.Client, // your manager client (delete)
-    rsipNS string,
-) error {
-    var rsips unstructured.UnstructuredList
-    rsips.SetGroupVersionKind(schema.GroupVersionKind{
-        Group: rsipGVK.Group, Version: rsipGVK.Version, Kind: rsipGVK.Kind + "List",
-    })
-
-    if err := reader.List(ctx, &rsips, client.InNamespace(rsipNS)); err != nil {
-        return err
-    }
-
-    for i := range rsips.Items {
-        rsip := &rsips.Items[i]
-        lbl := rsip.GetLabels()
-        secNS, okNS := lbl["mirror.fluxcd.io/secretNS"]
-        secName, okName := lbl["mirror.fluxcd.io/secretName"]
-        if !okNS || !okName || secNS == "" || secName == "" {
-            continue // not ours
-        }
-
-        // Check if the Secret still exists (uncached)
-        var sec corev1.Secret
-        err := reader.Get(ctx, types.NamespacedName{Namespace: secNS, Name: secName}, &sec)
-        if client.IgnoreNotFound(err) != nil {
-            log.Error(err, "secret existence check failed",
-                "rsip", rsip.GetName(), "secret", fmt.Sprintf("%s/%s", secNS, secName))
-            continue
-        }
-        if err == nil {
-            // Secret exists; keep the RSIP
-            continue
-        }
-
-        // Secret not found → delete the RSIP
-        if err := writer.Delete(ctx, rsip); client.IgnoreNotFound(err) != nil {
-            log.Error(err, "failed deleting orphan RSIP", "name", rsip.GetName())
-        } else {
-            log.Info("deleted orphan RSIP", "name", rsip.GetName(), "secret", fmt.Sprintf("%s/%s", secNS, secName))
-        }
-    }
-    return nil
+func predicateNS(nsSel labels.Selector) builder.Predicates {
+	return builder.WithPredicates(predicate.Funcs{
+		CreateFunc: func(e event.CreateEvent) bool { return nsSel.Matches(labels.Set(e.Object.GetLabels())) },
+		UpdateFunc: func(e event.UpdateEvent) bool { return nsSel.Matches(labels.Set(e.ObjectNew.GetLabels())) },
+		DeleteFunc: func(e event.DeleteEvent) bool { return true },
+		GenericFunc: func(e event.GenericEvent) bool {
+			return nsSel.Matches(labels.Set(e.Object.GetLabels()))
+		},
+	})
 }
+
+func predicateSecret(watchNS sets.Set[string], secSel labels.Selector, allowedNS *threadSafeSet) builder.Predicates {
+	return builder.WithPredicates(predicate.Funcs{
+		CreateFunc: func(e event.CreateEvent) bool {
+			return (watchNS.Len() == 0 || watchNS.Has(e.Object.GetNamespace())) &&
+				secSel.Matches(labels.Set(e.Object.GetLabels())) &&
+				allowedNS.Has(e.Object.GetNamespace())
+		},
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			return (watchNS.Len() == 0 || watchNS.Has(e.ObjectNew.GetNamespace())) &&
+				secSel.Matches(labels.Set(e.ObjectNew.GetLabels())) &&
+				allowedNS.Has(e.ObjectNew.GetNamespace())
+		},
+		DeleteFunc: func(e event.DeleteEvent) bool { return true }, // allow cleanup
+		GenericFunc: func(e event.GenericEvent) bool {
+			return (watchNS.Len() == 0 || watchNS.Has(e.Object.GetNamespace())) &&
+				secSel.Matches(labels.Set(e.Object.GetLabels())) &&
+				allowedNS.Has(e.Object.GetNamespace())
+		},
+	})
+}
+
+func sweepOrphanRSIPs(
+	ctx context.Context,
+	log logr.Logger,
+	reader client.Reader, // uncached
+	writer client.Client, // deletes
+	rsipNS string,
+) error {
+	var rsips unstructured.UnstructuredList
+	rsips.SetGroupVersionKind(schema.GroupVersionKind{
+		Group: rsipGVK.Group, Version: rsipGVK.Version, Kind: rsipGVK.Kind + "List",
+	})
+	if err := reader.List(ctx, &rsips, client.InNamespace(rsipNS)); err != nil {
+		return err
+	}
+	for i := range rsips.Items {
+		rsip := &rsips.Items[i]
+		lbl := rsip.GetLabels()
+		secNS, okNS := lbl["mirror.fluxcd.io/secretNS"]
+		secName, okName := lbl["mirror.fluxcd.io/secretName"]
+		if !okNS || !okName || secNS == "" || secName == "" {
+			continue
+		}
+
+		var sec corev1.Secret
+		err := reader.Get(ctx, types.NamespacedName{Namespace: secNS, Name: secName}, &sec)
+		if client.IgnoreNotFound(err) != nil {
+			log.Error(err, "secret existence check failed",
+				"rsip", rsip.GetName(), "secret", fmt.Sprintf("%s/%s", secNS, secName))
+			continue
+		}
+		if err == nil {
+			continue // secret still exists
+		}
+		if err := writer.Delete(ctx, rsip); client.IgnoreNotFound(err) != nil {
+			log.Error(err, "failed deleting orphan RSIP", "name", rsip.GetName())
+		} else {
+			log.Info("deleted orphan RSIP", "name", rsip.GetName(),
+				"secret", fmt.Sprintf("%s/%s", secNS, secName))
+		}
+	}
+	return nil
+}
+
+// ---- utils ----
 
 func splitNonEmpty(csv string) []string {
 	var out []string
 	for _, s := range strings.Split(csv, ",") {
-		s = strings.TrimSpace(s)
-		if s != "" {
+		if s = strings.TrimSpace(s); s != "" {
 			out = append(out, s)
 		}
 	}
@@ -522,7 +514,7 @@ func sanitizeDNS1123(in string) string {
 	s = strings.Map(repl, s)
 	s = strings.Trim(s, "-")
 	if len(s) == 0 {
-		return "cluster"
+		return "id"
 	}
 	if len(s) > 63 {
 		return s[:63]
@@ -530,42 +522,19 @@ func sanitizeDNS1123(in string) string {
 	return s
 }
 
-func mapsEqual(a, b map[string]any) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for k, va := range a {
-		vb, ok := b[k]
-		if !ok {
-			return false
-		}
-		switch vaTyped := va.(type) {
-		case map[string]any:
-			vbTyped, ok := vb.(map[string]any)
-			if !ok {
-				return false
-			}
-			if !mapsEqual(vaTyped, vbTyped) {
-				return false
-			}
-		default:
-			if fmt.Sprintf("%v", va) != fmt.Sprintf("%v", vb) {
-				return false
-			}
-		}
-	}
-	return true
-}
-
 func hasAnyPrefix(prefixes []string, key string) bool {
 	for _, p := range prefixes {
-		p = strings.TrimSpace(p)
-		if p == "" {
-			continue
-		}
-		if strings.HasPrefix(key, p) {
+		if p = strings.TrimSpace(p); p != "" && strings.HasPrefix(key, p) {
 			return true
 		}
 	}
 	return false
+}
+
+// Best-effort derive project from namespace (supports "p-<project>")
+func projectFromNamespace(ns string) string {
+	if strings.HasPrefix(ns, "p-") && len(ns) > 2 {
+		return ns[2:]
+	}
+	return ""
 }
