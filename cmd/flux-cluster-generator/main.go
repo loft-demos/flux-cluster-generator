@@ -71,7 +71,7 @@ func main() {
 	flag.StringVar(&labelSelectorStr, "label-selector", "", "Label selector for source Secrets, e.g. env=dev,team=payments,fluxcd/secret-type=cluster")
 	flag.StringVar(&secretKey, "secret-key", "config", "Key in the Secret data that contains the kubeconfig")
 	flag.StringVar(&rsipNamePrefix, "rsip-name-prefix", "inputs-", "Prefix for generated RSIP names")
-	flag.StringVar(&clusterNameKey, "cluster-name-label-key", "vcluster.loft.sh/cluster-name", "Label key on the Secret to derive cluster name; fallback to Secret name")
+	flag.StringVar(&clusterNameKey, "cluster-name-label-key", "vci.flux.loft.sh/name", "Label key on the Secret to derive cluster name; fallback to Secret name")
 	flag.StringVar(&copyLabelKeysCSV, "copy-label-keys", "env,team,region", "Comma-separated label KEYS to copy from Secret to RSIP")
 	flag.StringVar(&copyLabelPrefixesCSV, "copy-label-prefixes", "", "Comma-separated label KEY PREFIXES to copy (e.g. flux-app/)")
 	flag.StringVar(&namespaceLabelSelectorStr, "namespace-label-selector", "", "Label selector for Namespaces to include (e.g. flux-cluster-generator-enabled=true)")
