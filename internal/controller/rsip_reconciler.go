@@ -2,6 +2,7 @@
 package controller
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"maps"
@@ -67,7 +68,7 @@ func (r *SecretMirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return reconcile.Result{}, nil
 	}
 
-	// names/ids
+	// --- derive cluster/project for defaultValues (legacy behavior) ---
 	clusterName := sec.Labels[r.Opts.ClusterNameKey]
 	if clusterName == "" {
 		clusterName = sec.Name
@@ -82,11 +83,31 @@ func (r *SecretMirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 	project = sanitizeDNS1123(project)
 
-	rsipName := r.Opts.RSIPNamePrefix
-	if project != "" {
-		rsipName += project + "-"
+	// --- RSIP name: template (if provided) OR fallback to legacy "prefix+project-cluster" ---
+	var rsipName string
+	if r.Opts.RSIPNameTemplate != nil {
+		var buf bytes.Buffer
+		ctxObj := map[string]any{
+			"name":        sec.Name,
+			"namespace":   sec.Namespace,
+			"labels":      sec.Labels,
+			"annotations": sec.Annotations,
+		}
+		if err := r.Opts.RSIPNameTemplate.Execute(&buf, ctxObj); err != nil {
+			log.Error(err, "rsip-name-template execution failed; falling back to project/cluster")
+		} else if out := strings.TrimSpace(buf.String()); out != "" {
+			rsipName = r.Opts.RSIPNamePrefix + out
+		}
 	}
-	rsipName += clusterName
+	if rsipName == "" {
+		// legacy fallback
+		rsipName = r.Opts.RSIPNamePrefix
+		if project != "" {
+			rsipName += project + "-"
+		}
+		rsipName += clusterName
+	}
+	log.V(1).Info("computed RSIP name", "rsipName", rsipName, "templated", r.Opts.RSIPNameTemplate != nil)
 
 	// desired RSIP
 	desired := &unstructured.Unstructured{}
@@ -138,6 +159,7 @@ func (r *SecretMirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			}
 		}
 	}
+
 	_ = unstructured.SetNestedField(desired.Object, map[string]any{
 		"type":          "Static",
 		"defaultValues": dv,

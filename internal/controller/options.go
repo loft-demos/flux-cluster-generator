@@ -16,6 +16,8 @@ type Options struct {
 	RSIPNamePrefix  string
 	ClusterNameKey  string
 	ProjectLabelKey string
+	RSIPNameTemplateStr string
+	RSIPNameTemplate    *template.Template
 
 	// Selectors / filters (raw strings for flags)
 	LabelSelectorStr          string

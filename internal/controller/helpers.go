@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"unicode"
+	"text/template"
 )
 
 // Best-effort derive project from namespace (supports "p-<project>")
@@ -12,6 +13,27 @@ func projectFromNamespace(ns string) string {
 		return ns[2:]
 	}
 	return ""
+}
+
+func TemplateFuncMap() template.FuncMap {
+	return template.FuncMap{
+		"label": func(m map[string]string, k string) string { return m[k] },
+		"ann":   func(m map[string]string, k string) string { return m[k] },
+		"default": func(def string, v string) string {
+			if v == "" { return def }
+			return v
+		},
+		"coalesce": func(vals ...string) string {
+			for _, v := range vals {
+				if strings.TrimSpace(v) != "" {
+					return v
+				}
+			}
+			return ""
+		},
+		"dns1123":       sanitizeDNS1123,
+		"projectFromNS": projectFromNamespace,
+	}
 }
 
 // Sanitize to DNS-1123 label (lowercase alnum and '-', max 63, no leading/trailing '-')
