@@ -1,0 +1,19 @@
+{{- if .Values.rbac.create }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "fcg.name" . }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets","namespaces"]
+    verbs: ["get","list","watch"]
+  - apiGroups: ["fluxcd.controlplane.io"]
+    resources: ["resourcesetinputproviders","resourcesetinputproviders/status"]
+    verbs: ["get","list","watch","create","update","patch","delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create","patch","update"]
+  - apiGroups: ["events.k8s.io"]
+    resources: ["events"]
+    verbs: ["create","patch","update"]
+{{- end }}
