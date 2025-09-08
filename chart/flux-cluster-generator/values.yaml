@@ -1,21 +1,22 @@
 image:
   repository: ghcr.io/loft-demos/flux-cluster-generator
-  tag: ""   # default: appVersion
+  tag: ""            # empty -> defaults to .Chart.AppVersion
   pullPolicy: IfNotPresent
 
 args:
-  rsipNamespace: "flux-apps"
+  rsipNamespace: flux-apps
   labelSelector: "fluxcd.io/secret-type=cluster"
-  secretKey: "value"
-  rsipNamePrefix: "inputs-"
-  clusterNameKey: "vci.flux.loft.sh/name"
-  projectLabelKey: "vci.flux.loft.sh/project"
-  copyLabelKeys: "env,team,region"
+  secretKey: value
+  rsipNamePrefix: inputs-
+  clusterNameKey: vci.flux.loft.sh/name
+  projectLabelKey: vci.flux.loft.sh/project
+  copyLabelKeys: "env,team"
   copyLabelPrefixes: "flux-app/"
-  namespaceLabelSelector: ""   # e.g. "flux-cluster-generator-enabled=true"
-  watchNamespaces: ""          # comma list, empty = all
-  concurrency: 2
-  cacheSyncTimeoutSeconds: 120
+  namespaceLabelSelector: ""
+  watchNamespaces: ""
+  maxConcurrent: 2
+  cacheSyncSeconds: 120
+  zapLogLevel: info
 
 rbac:
   create: true
