@@ -3,80 +3,67 @@ package main
 import (
 	"flag"
 	"os"
-	"strings"
 	"time"
 
-	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/apimachinery/pkg/runtime"
-
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/metrics/server"
-	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	"github.com/loft-demos/flux-cluster-generator/internal/controller"
 )
 
 func main() {
-	// ----- logging / flags
 	z := zap.Options{Development: false}
 	z.BindFlags(flag.CommandLine)
-
-	opts := controller.Options{} // see options.go
-	flag.StringVar(&opts.RSIPNamespace, "rsip-namespace", "flux-apps", "Namespace to create RSIPs in")
-	flag.StringVar(&opts.SecretKey, "secret-key", "config", "Key in Secret.data with kubeconfig")
-	flag.StringVar(&opts.RSIPNamePrefix, "rsip-name-prefix", "inputs-", "Prefix for RSIP names")
-	flag.StringVar(&opts.ClusterNameKey, "cluster-name-label-key", "vci.flux.loft.sh/name", "Label key for cluster name")
-	flag.StringVar(&opts.ProjectLabelKey, "project-label-key", "vci.flux.loft.sh/project", "Label key for project")
-	flag.StringVar(&opts.LabelSelectorStr, "label-selector", "", "Selector for source Secrets")
-	flag.StringVar(&opts.NamespaceLabelSelectorStr, "namespace-label-selector", "", "Selector for Namespaces to include")
-	flag.StringVar(&opts.CopyLabelKeysCSV, "copy-label-keys", "env,team,region", "Label KEYS to copy")
-	flag.StringVar(&opts.CopyLabelPrefixesCSV, "copy-label-prefixes", "", "Label KEY PREFIXES to copy (e.g. flux-app/)")
-	flag.StringVar(&opts.WatchNamespacesCSV, "watch-namespaces", "", "Optional list of namespaces to watch")
-	flag.IntVar(&opts.MaxConcurrent, "concurrency", 2, "Max concurrent reconciles")
-	flag.DurationVar(&opts.CacheSyncTimeout, "cache-sync-timeout", 2*time.Minute, "Informer cache sync timeout")
-	flag.Parse()
-
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&z)))
+	logger := ctrl.Log.WithName("setup")
 
-	// ----- scheme / manager
+	// ---- bind flags directly into Options ----
+	var opts controller.Options
+	flag.StringVar(&opts.RSIPNamespace, "rsip-namespace", "flux-apps", "Namespace to create RSIPs in")
+	flag.StringVar(&opts.LabelSelectorStr, "label-selector", "", "Label selector for source Secrets")
+	flag.StringVar(&opts.SecretKey, "secret-key", "config", "Key in Secret.data that contains the kubeconfig")
+	flag.StringVar(&opts.RSIPNamePrefix, "rsip-name-prefix", "inputs-", "Prefix for generated RSIP names")
+	flag.StringVar(&opts.ClusterNameKey, "cluster-name-label-key", "vci.flux.loft.sh/name", "Label key for cluster name")
+	flag.StringVar(&opts.ProjectLabelKey, "project-label-key", "vci.flux.loft.sh/project", "Label key for VCI project")
+	flag.StringVar(&opts.CopyLabelKeysCSV, "copy-label-keys", "env,team,region", "Comma-separated label KEYS to copy")
+	flag.StringVar(&opts.CopyLabelPrefixesCSV, "copy-label-prefixes", "", "Comma-separated label KEY PREFIXES to copy (e.g. flux-app/)")
+	flag.StringVar(&opts.NamespaceLabelSelectorStr, "namespace-label-selector", "", "Label selector for Namespaces to include")
+	flag.StringVar(&opts.WatchNamespacesCSV, "watch-namespaces", "", "Comma-separated namespaces to watch (empty = all)")
+
+	// tuning (optional)
+	flag.IntVar(&opts.MaxConcurrent, "max-concurrent", 2, "MaxConcurrentReconciles for the Secret controller")
+	var cacheSyncSeconds int
+	flag.IntVar(&cacheSyncSeconds, "cache-sync-seconds", 120, "Cache sync timeout (seconds)")
+
+	flag.Parse()
+	opts.CacheSyncTimeout = time.Duration(cacheSyncSeconds) * time.Second
+
+	// parse + defaults + validation
+	if err := opts.FillAndValidate(); err != nil {
+		logger.Error(err, "invalid options")
+		os.Exit(1)
+	}
+
+	// manager
 	scheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(scheme)
-
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme:                 scheme,
-		Metrics:                server.Options{BindAddress: ":8080"},
-		HealthProbeBindAddress: ":8081",
-		LeaderElection:         true,
-		LeaderElectionID:       "flux-cluster-generator",
-	})
+	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{Scheme: scheme})
 	if err != nil {
-		panic(err)
+		logger.Error(err, "unable to start manager")
+		os.Exit(1)
 	}
 
-	// Expand CSVs to slices/sets once
-	opts.CopyLabelKeys = controller.SplitNonEmpty(opts.CopyLabelKeysCSV)
-	opts.CopyLabelPrefixes = controller.SplitNonEmpty(opts.CopyLabelPrefixesCSV)
-	opts.WatchNamespaces = controller.SplitNonEmpty(opts.WatchNamespacesCSV)
-	opts.LabelSelector = controller.ParseSelectorOrDie(opts.LabelSelectorStr)
-	opts.NamespaceSelector = controller.ParseSelectorOrDie(opts.NamespaceLabelSelectorStr)
-
-	// ----- wire controllers
-	if err := controller.SetupNamespaceSetController(mgr, opts); err != nil {
-		panic(err)
-	}
+	// single entry point to wire everything
 	if err := controller.SetupRSIPController(mgr, opts); err != nil {
-		panic(err)
+		logger.Error(err, "unable to setup RSIP controller")
+		os.Exit(1)
 	}
 
-	// healthz/readyz
-	_ = mgr.AddHealthzCheck("ping", healthz.Ping)
-	_ = mgr.AddReadyzCheck("ping", healthz.Ping)
-
+	logger.Info("starting manager")
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
-		panic(err)
+		logger.Error(err, "problem running manager")
+		os.Exit(1)
 	}
-
-	_ = os.Stdout.Sync()
-	_ = strings.Builder{} // avoid unused imports on some toolchains
 }
