@@ -107,6 +107,9 @@ func (r *SecretMirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 		rsipName += clusterName
 	}
+	if len(rsipName) > 253 {
+	    rsipName = rsipName[:253]
+	}
 	log.V(1).Info("computed RSIP name", "rsipName", rsipName, "templated", r.Opts.RSIPNameTemplate != nil)
 
 	// desired RSIP
