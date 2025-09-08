@@ -24,18 +24,29 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:
             - "--rsip-namespace={{ .Values.args.rsipNamespace }}"
-            - "--label-selector={{ .Values.args.labelSelector }}"
+            {{- with .Values.args.labelSelector }}
+            - "--label-selector={{ . }}"
+            {{- end }}
             - "--secret-key={{ .Values.args.secretKey }}"
             - "--rsip-name-prefix={{ .Values.args.rsipNamePrefix }}"
             - "--cluster-name-label-key={{ .Values.args.clusterNameKey }}"
             - "--project-label-key={{ .Values.args.projectLabelKey }}"
-            - "--copy-label-keys={{ .Values.args.copyLabelKeys }}"
-            - "--copy-label-prefixes={{ .Values.args.copyLabelPrefixes }}"
-            - "--namespace-label-selector={{ .Values.args.namespaceLabelSelector }}"
-            - "--watch-namespaces={{ .Values.args.watchNamespaces }}"
-            - "--concurrency={{ .Values.args.concurrency }}"
-            - "--cache-sync-timeout={{ .Values.args.cacheSyncTimeoutSeconds }}s"
-            - "--zap-log-level=debug"
+            {{- with .Values.args.copyLabelKeys }}
+            - "--copy-label-keys={{ . }}"
+            {{- end }}
+            {{- with .Values.args.copyLabelPrefixes }}
+            - "--copy-label-prefixes={{ . }}"
+            {{- end }}
+            {{- with .Values.args.namespaceLabelSelector }}
+            - "--namespace-label-selector={{ . }}"
+            {{- end }}
+            {{- with .Values.args.watchNamespaces }}
+            - "--watch-namespaces={{ . }}"
+            {{- end }}
+            # Correct flag names; coalesce keeps compatibility with old values keys
+            - "--max-concurrent={{ coalesce .Values.args.maxConcurrent .Values.args.concurrency | default 2 }}"
+            - "--cache-sync-seconds={{ coalesce .Values.args.cacheSyncSeconds .Values.args.cacheSyncTimeoutSeconds | default 120 }}"
+            - "--zap-log-level={{ .Values.args.zapLogLevel | default "info" }}"
           resources:
 {{- toYaml .Values.resources | nindent 12 }}
       nodeSelector:
