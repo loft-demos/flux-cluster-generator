@@ -8,12 +8,29 @@ The controller watches for Kubernetes Secrets that:
 - Optionally watch namespaces that match a configurable label selector (e.g. `flux-cluster-generator-enabled=true`)
 
 For each matching Secret, the controller creates a corresponding ResourceSetInputProvider (RSIP).
-- The generated RSIP includes the Secret’s name, namespace, and KubeConfig key as defaultValues and as .metadata.labels.
+- The generated RSIP includes the Secret’s name, namespace, and KubeConfig key as defaultValues and as `.metadata.labels`.
 - Optional extra defaultValues can also be derived from the Secret’s labels, based on configuration (see below).
 
 ## Why use this?
 
-This enables GitOps-style generation of Kuberentes resources for multiple dynamic Kubernetes clusters using one [Flux `ResourceSet`](https://fluxcd.control-plane.io/operator/resourceset/) similar to the [Argo CD Cluster Generator for `ApplicationSets`](https://argo-cd.readthedocs.io/en/stable/operator-manual/applicationset/Generators-Cluster/). While the documentation for Flux `ResourceSets` does include a [_Multi-cluster example_](https://fluxcd.control-plane.io/operator/resourcesets/app-definition/#multi-cluster-example), it is very static and would require adding and removing cluster inputs in every `ResourceSet` you would like to use across multiple clusters. The **flux-cluster-generator** works more like the Argo CD Cluster Generator for `ApplicationSets` in that it will dynamically associate a new Kuberenetes cluster represented as a Kubernetes Flux KubeConfig reference `Secret` and allow the reuse of Flux `ResourceSets` across all of those clusters by generating a cluster specific `ResourceInputProvider` based on each of those `Secrets`. While originally designed for dynamic vCluster environments (and paired with the [**vcluster-platform-flux-secret-controller**](https://github.com/loft-demos/vcluster-platform-flux-secret-controller)), it can be used with any Kubernetes Flux KubeConfig reference `Secret`.
+Flux supports [`ResourceSets` for multi-cluster GitOps workflows](https://fluxcd.control-plane.io/operator/resourcesets/app-definition/#multi-cluster-example). However, the official examples are static—you must manually add or remove cluster inputs in each ResourceSet definition whenever clusters are added or removed.
+
+The **flux-cluster-generator** brings the same dynamic behavior that [Argo CD’s Cluster Generator for ApplicationSets](https://argo-cd.readthedocs.io/en/stable/operator-manual/applicationset/Generators-Cluster/) provides:
+- When a new Kubernetes cluster is represented as a Flux KubeConfig reference `Secret`, the controller automatically generates an RSIP.
+- `ResourceSets` can then be reused across all clusters, without requiring per-cluster manual edits.
+- When a cluster is removed (and its Secret deleted), the corresponding RSIP is also cleaned up.
+
+This enables dynamic, GitOps-driven multi-cluster resource management.
+
+While originally designed for dynamic vCluster environments (and paired with the [**vcluster-platform-flux-secret-controller**](https://github.com/loft-demos/vcluster-platform-flux-secret-controller)), it can be used with any Kubernetes Flux KubeConfig reference `Secret`.
+
+### Use cases
+
+- Dynamic vCluster environments
+  Originally built for vCluster Platform `VirtualClusterInstances` where it is common to have ephemeral or short-lived vCluster instances appear and disappear frequently. And when paired with [**vcluster-platform-flux-secret-controller**](https://github.com/loft-demos/vcluster-platform-flux-secret-controller), the Flux KubeConfig reference `Secret` will be created when a `VirtualClusterInstance` is created with a label selector.
+
+- Any Flux-managed clusters
+  Works with any Kubernetes Secret that Flux recognizes as a KubeConfig reference, making it useful outside of vCluster as well.
 
 ---
 
