@@ -1,0 +1,6 @@
+apiVersion: v2
+name: flux-cluster-generator
+description: Mirrors kubeconfig Secrets to Flux ResourceSetInputProviders
+type: application
+version: 0.1.0        # chart version (overridden in CI)
+appVersion: "0.1.0"   # app version (overridden in CI)
