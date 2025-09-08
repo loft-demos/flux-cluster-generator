@@ -46,7 +46,7 @@ func (o *Options) FillAndValidate() error {
 		o.RSIPNamespace = "flux-apps"
 	}
 	if o.SecretKey == "" {
-		o.SecretKey = "config"
+		o.SecretKey = "value"
 	}
 	if o.RSIPNamePrefix == "" {
 		o.RSIPNamePrefix = "inputs-"
