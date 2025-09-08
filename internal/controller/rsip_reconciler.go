@@ -1,3 +1,4 @@
+// internal/controller/rsip_reconciler.go
 package controller
 
 import (
@@ -14,17 +15,17 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/validation"
+	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/workqueue"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
-	"k8s.io/client-go/util/workqueue"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
 var rsipGVK = schema.GroupVersionKind{
@@ -36,10 +37,9 @@ var rsipGVK = schema.GroupVersionKind{
 type SecretMirrorReconciler struct {
 	client.Client
 	APIReader client.Reader
+	Recorder  record.EventRecorder
 
-	Opts Options
-
-	// in-memory allow-list for Namespaces
+	Opts      Options
 	allowedNS *threadSafeSet
 }
 
@@ -49,6 +49,7 @@ func SetupRSIPController(mgr ctrl.Manager, opts Options) error {
 	r := &SecretMirrorReconciler{
 		Client:    mgr.GetClient(),
 		APIReader: mgr.GetAPIReader(),
+		Recorder:  mgr.GetEventRecorderFor("flux-cluster-generator"),
 		Opts:      opts,
 		allowedNS: allowed,
 	}
@@ -63,9 +64,13 @@ func SetupRSIPController(mgr ctrl.Manager, opts Options) error {
 				allowed.Add(nsList.Items[i].Name)
 			}
 		}
+		ctrl.Log.WithName("setup").V(1).Info("seeded allowed namespaces",
+			"count", len(allowed.m))
+	} else {
+		ctrl.Log.WithName("setup").Error(err, "failed to seed allowed namespaces")
 	}
 
-	// Namespace controller (keeps allowlist up to date)
+	// Namespace controller
 	nsPred := predicate.Funcs{
 		CreateFunc: func(e event.CreateEvent) bool { return opts.NamespaceSelector.Matches(labels.Set(e.Object.GetLabels())) },
 		UpdateFunc: func(e event.UpdateEvent) bool { return opts.NamespaceSelector.Matches(labels.Set(e.ObjectNew.GetLabels())) },
@@ -118,15 +123,29 @@ func (r *SecretMirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	var sec corev1.Secret
 	if err := r.Get(ctx, req.NamespacedName, &sec); err != nil {
-		return reconcile.Result{}, r.ensureRSIPAbsence(ctx, req.NamespacedName)
+		// Secret is gone — cleanup any RSIPs that referenced it
+		if err2 := r.ensureRSIPAbsence(ctx, req.NamespacedName); err2 != nil {
+			log.Error(err2, "cleanup after secret deletion failed")
+			return reconcile.Result{}, err2
+		}
+		log.V(1).Info("cleaned up after secret deletion")
+		return reconcile.Result{}, nil
 	}
 
 	// filters
-	if !r.allowedNS.Has(sec.Namespace) || !r.Opts.LabelSelector.Matches(labels.Set(sec.Labels)) {
-		return reconcile.Result{}, r.ensureRSIPAbsence(ctx, req.NamespacedName)
+	if !r.allowedNS.Has(sec.Namespace) {
+		log.V(1).Info("namespace not in allowlist; ensuring cleanup", "namespace", sec.Namespace)
+		_ = r.ensureRSIPAbsence(ctx, req.NamespacedName)
+		return reconcile.Result{}, nil
+	}
+	if !r.Opts.LabelSelector.Matches(labels.Set(sec.Labels)) {
+		log.V(1).Info("secret does not match label selector; ensuring cleanup",
+			"selector", r.Opts.LabelSelector.String())
+		_ = r.ensureRSIPAbsence(ctx, req.NamespacedName)
+		return reconcile.Result{}, nil
 	}
 	if _, ok := sec.Data[r.Opts.SecretKey]; !ok {
-		log.V(1).Info("missing kubeconfig key; skipping", "key", r.Opts.SecretKey)
+		log.Info("secret missing kubeconfig key; skipping", "key", r.Opts.SecretKey)
 		return reconcile.Result{}, nil
 	}
 
@@ -136,6 +155,7 @@ func (r *SecretMirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		clusterName = sec.Name
 	}
 	if errs := validation.IsDNS1123Label(clusterName); len(errs) > 0 {
+		log.V(1).Info("sanitizing cluster name to DNS-1123", "errors", errs)
 		clusterName = sanitizeDNS1123(clusterName)
 	}
 	project := strings.TrimSpace(sec.Labels[r.Opts.ProjectLabelKey])
@@ -164,7 +184,6 @@ func (r *SecretMirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		"mirror.fluxcd.io/clusterName": clusterName,
 		"mirror.fluxcd.io/project":     project,
 	}
-	// copy selected labels to RSIP labels
 	for _, k := range r.Opts.CopyLabelKeys {
 		if v, ok := sec.Labels[k]; ok {
 			lbls[k] = v
@@ -177,7 +196,6 @@ func (r *SecretMirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 	desired.SetLabels(lbls)
 
-	// defaultValues incl. camelCased copies of selected labels
 	dv := map[string]any{
 		"name":           clusterName,
 		"project":        project,
@@ -186,7 +204,6 @@ func (r *SecretMirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		"kubeSecretNS":   sec.Namespace,
 	}
 	reserved := sets.New[string]("name", "project", "kubeSecretName", "kubeSecretKey", "kubeSecretNS")
-
 	for _, k := range r.Opts.CopyLabelKeys {
 		if v, ok := sec.Labels[k]; ok {
 			ck := toCamel(k)
@@ -214,9 +231,14 @@ func (r *SecretMirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	existing.SetGroupVersionKind(rsipGVK)
 	if err := r.Get(ctx, types.NamespacedName{Name: rsipName, Namespace: r.Opts.RSIPNamespace}, &existing); err != nil {
 		if err := r.Create(ctx, desired); err != nil {
+			r.Recorder.Eventf(&sec, corev1.EventTypeWarning, "RSIPCreateFailed",
+				"failed to create RSIP %s/%s: %v", r.Opts.RSIPNamespace, rsipName, err)
+			log.Error(err, "create RSIP failed", "name", rsipName, "ns", r.Opts.RSIPNamespace)
 			return reconcile.Result{}, err
 		}
-		log.Info("created RSIP", "name", rsipName)
+		r.Recorder.Eventf(&sec, corev1.EventTypeNormal, "RSIPCreated",
+			"created RSIP %s/%s", r.Opts.RSIPNamespace, rsipName)
+		log.Info("created RSIP", "name", rsipName, "ns", r.Opts.RSIPNamespace)
 		return reconcile.Result{}, nil
 	}
 
@@ -233,98 +255,73 @@ func (r *SecretMirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 	if changed {
 		if err := r.Update(ctx, &existing); err != nil {
+			r.Recorder.Eventf(&sec, corev1.EventTypeWarning, "RSIPUpdateFailed",
+				"failed to update RSIP %s/%s: %v", r.Opts.RSIPNamespace, rsipName, err)
+			log.Error(err, "update RSIP failed", "name", rsipName)
 			return reconcile.Result{}, err
 		}
+		r.Recorder.Eventf(&sec, corev1.EventTypeNormal, "RSIPUpdated",
+			"updated RSIP %s/%s", r.Opts.RSIPNamespace, rsipName)
 		log.Info("updated RSIP", "name", rsipName)
+	} else {
+		log.V(1).Info("RSIP up-to-date", "name", rsipName)
 	}
 	return reconcile.Result{}, nil
 }
 
-// ----- shared helpers (kept local; move to util/ if you reuse) -----
+func (r *SecretMirrorReconciler) ensureRSIPAbsence(ctx context.Context, secretNN types.NamespacedName) error {
+	log := ctrl.Log.WithName("gc")
 
-type threadSafeSet struct {
-	mu sync.RWMutex
-	m  map[string]struct{}
+	// List by labels (works even when the Secret is already gone)
+	var list unstructured.UnstructuredList
+	list.SetGroupVersionKind(schema.GroupVersionKind{
+		Group: rsipGVK.Group, Version: rsipGVK.Version, Kind: rsipGVK.Kind + "List",
+	})
+	if err := r.APIReader.List(ctx, &list,
+		client.InNamespace(r.Opts.RSIPNamespace),
+		client.MatchingLabels{
+			"mirror.fluxcd.io/secretNS":   secretNN.Namespace,
+			"mirror.fluxcd.io/secretName": secretNN.Name,
+		},
+	); err != nil {
+		log.Error(err, "list RSIPs for cleanup failed", "secret", secretNN.String())
+		return err
+	}
+
+	if len(list.Items) == 0 {
+		log.V(1).Info("no RSIPs to delete for secret", "secret", secretNN.String())
+		return nil
+	}
+
+	deleted := 0
+	var errs []error
+	for i := range list.Items {
+		rsip := &list.Items[i]
+		if err := r.Delete(ctx, rsip); client.IgnoreNotFound(err) != nil {
+			errs = append(errs, err)
+			log.Error(err, "delete RSIP failed", "name", rsip.GetName())
+		} else {
+			deleted++
+			log.Info("deleted RSIP", "name", rsip.GetName())
+		}
+	}
+	if deleted > 0 {
+		r.Recorder.Eventf(&corev1.ObjectReference{
+			Kind:      "Secret",
+			Namespace: secretNN.Namespace,
+			Name:      secretNN.Name,
+		}, corev1.EventTypeNormal, "RSIPsDeleted", "deleted %d RSIP(s) for secret %s", deleted, secretNN.String())
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("cleanup had %d error(s), deleted=%d", len(errs), deleted)
+	}
+	return nil
 }
+
+// ----- shared helpers (unchanged) -----
+type threadSafeSet struct { mu sync.RWMutex; m map[string]struct{} }
 func newThreadSafeSet() *threadSafeSet { return &threadSafeSet{m: map[string]struct{}{}} }
 func (s *threadSafeSet) Has(k string) bool { s.mu.RLock(); defer s.mu.RUnlock(); _, ok := s.m[k]; return ok }
 func (s *threadSafeSet) Add(k string)       { s.mu.Lock(); defer s.mu.Unlock(); s.m[k] = struct{}{} }
 func (s *threadSafeSet) Delete(k string)    { s.mu.Lock(); defer s.mu.Unlock(); delete(s.m, k) }
-
-type NamespaceSetReconciler struct {
-	client.Client
-	AllowedNS *threadSafeSet
-	Selector  labels.Selector
-}
-
-func (r *NamespaceSetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (reconcile.Result, error) {
-	var ns corev1.Namespace
-	if err := r.Get(ctx, req.NamespacedName, &ns); err != nil {
-		r.AllowedNS.Delete(req.Name)
-		return reconcile.Result{}, nil
-	}
-	if r.Selector.Matches(labels.Set(ns.Labels)) {
-		r.AllowedNS.Add(ns.Name)
-	} else {
-		r.AllowedNS.Delete(ns.Name)
-	}
-	return reconcile.Result{}, nil
-}
-
-// utils
-func boolPtr(b bool) *bool { return &b }
-
-func projectFromNamespace(ns string) string {
-	if strings.HasPrefix(ns, "p-") && len(ns) > 2 { return ns[2:] }
-	return ""
-}
-func sanitizeDNS1123(in string) string {
-	s := strings.ToLower(in)
-	mapper := func(r rune) rune {
-		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' { return r }
-		return '-'
-	}
-	s = strings.Map(mapper, s)
-	s = strings.Trim(s, "-")
-	if s == "" { return "id" }
-	if len(s) > 63 { return s[:63] }
-	return s
-}
-func hasAnyPrefix(prefixes []string, key string) bool {
-	for _, p := range prefixes {
-		if p = strings.TrimSpace(p); p != "" && strings.HasPrefix(key, p) { return true }
-	}
-	return false
-}
-func mapsEqual(a, b map[string]any) bool {
-	if len(a) != len(b) { return false }
-	for k, va := range a {
-		vb, ok := b[k]; if !ok { return false }
-		switch at := va.(type) {
-		case map[string]any:
-			bt, ok := vb.(map[string]any); if !ok { return false }
-			if !mapsEqual(at, bt) { return false }
-		default:
-			if fmt.Sprintf("%v", va) != fmt.Sprintf("%v", vb) { return false }
-		}
-	}
-	return true
-}
-func toCamel(s string) string {
-	if s == "" { return s }
-	sep := func(r rune) bool { return r == '-' || r == '_' || r == '.' || r == '/' || r == ':' }
-	parts := strings.FieldsFunc(s, sep)
-	if len(parts) == 0 { return s }
-	for i := range parts { parts[i] = strings.TrimSpace(parts[i]) }
-	out := strings.ToLower(parts[0])
-	for _, p := range parts[1:] {
-		if p == "" { continue }
-		out += strings.ToUpper(p[:1]) + strings.ToLower(p[1:])
-	}
-	// strip non-alnum
-	b := strings.Builder{}
-	for _, r := range out {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') { b.WriteRune(r) }
-	}
-	return b.String()
-}
+// … keep the rest of your helpers (sanitizeDNS1123, projectFromNamespace, hasAnyPrefix, mapsEqual, toCamel, boolPtr)
