@@ -148,3 +148,5 @@ func toStringSet(items []string) setsString {
 }
 func (s setsString) Has(k string) bool { _, ok := s.m[k]; return ok }
 func (s setsString) Len() int          { return len(s.m) }
+// boolPtr is a tiny helper used when wiring controller options.
+func boolPtr(b bool) *bool { return &b }
