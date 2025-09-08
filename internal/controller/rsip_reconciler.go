@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -137,7 +138,6 @@ func (r *SecretMirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			}
 		}
 	}
-
 	_ = unstructured.SetNestedField(desired.Object, map[string]any{
 		"type":          "Static",
 		"defaultValues": dv,
@@ -222,23 +222,12 @@ func (r *SecretMirrorReconciler) ensureRSIPAbsence(ctx context.Context, secretNN
 			log.Info("deleted RSIP", "name", rsip.GetName())
 		}
 	}
+	// No Eventf here: we don't have a runtime.Object for a deleted Secret.
 	if deleted > 0 {
-		r.Recorder.Eventf(&corev1.ObjectReference{
-			Kind:      "Secret",
-			Namespace: secretNN.Namespace,
-			Name:      secretNN.Name,
-		}, corev1.EventTypeNormal, "RSIPsDeleted", "deleted %d RSIP(s) for secret %s", deleted, secretNN.String())
+		log.Info("deleted RSIPs for secret", "secret", secretNN.String(), "count", deleted)
 	}
 	if len(errs) > 0 {
 		return fmt.Errorf("cleanup had %d error(s), deleted=%d", len(errs), deleted)
 	}
 	return nil
 }
-
-// ----- shared helpers (unchanged) -----
-type threadSafeSet struct { mu sync.RWMutex; m map[string]struct{} }
-func newThreadSafeSet() *threadSafeSet { return &threadSafeSet{m: map[string]struct{}{}} }
-func (s *threadSafeSet) Has(k string) bool { s.mu.RLock(); defer s.mu.RUnlock(); _, ok := s.m[k]; return ok }
-func (s *threadSafeSet) Add(k string)       { s.mu.Lock(); defer s.mu.Unlock(); s.m[k] = struct{}{} }
-func (s *threadSafeSet) Delete(k string)    { s.mu.Lock(); defer s.mu.Unlock(); delete(s.m, k) }
-// … keep the rest of your helpers (sanitizeDNS1123, projectFromNamespace, hasAnyPrefix, mapsEqual, toCamel, boolPtr)
