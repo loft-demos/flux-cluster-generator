@@ -234,11 +234,3 @@ func (r *SecretMirrorReconciler) ensureRSIPAbsence(ctx context.Context, secretNN
 	}
 	return nil
 }
-
-// ----- shared helpers (unchanged) -----
-type threadSafeSet struct { mu sync.RWMutex; m map[string]struct{} }
-func newThreadSafeSet() *threadSafeSet { return &threadSafeSet{m: map[string]struct{}{}} }
-func (s *threadSafeSet) Has(k string) bool { s.mu.RLock(); defer s.mu.RUnlock(); _, ok := s.m[k]; return ok }
-func (s *threadSafeSet) Add(k string)       { s.mu.Lock(); defer s.mu.Unlock(); s.m[k] = struct{}{} }
-func (s *threadSafeSet) Delete(k string)    { s.mu.Lock(); defer s.mu.Unlock(); delete(s.m, k) }
-// … keep the rest of your helpers (sanitizeDNS1123, projectFromNamespace, hasAnyPrefix, mapsEqual, toCamel, boolPtr)
