@@ -1,0 +1,46 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "fcg.name" . }}
+  labels:
+    app.kubernetes.io/name: {{ include "fcg.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "fcg.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "fcg.name" . }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      serviceAccountName: {{ include "fcg.serviceAccountName" . }}
+      containers:
+        - name: flux-cluster-generator
+          image: "{{ .Values.image.repository }}:{{ default .Chart.AppVersion .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - "--rsip-namespace={{ .Values.args.rsipNamespace }}"
+            - "--label-selector={{ .Values.args.labelSelector }}"
+            - "--secret-key={{ .Values.args.secretKey }}"
+            - "--rsip-name-prefix={{ .Values.args.rsipNamePrefix }}"
+            - "--cluster-name-label-key={{ .Values.args.clusterNameKey }}"
+            - "--project-label-key={{ .Values.args.projectLabelKey }}"
+            - "--copy-label-keys={{ .Values.args.copyLabelKeys }}"
+            - "--copy-label-prefixes={{ .Values.args.copyLabelPrefixes }}"
+            - "--namespace-label-selector={{ .Values.args.namespaceLabelSelector }}"
+            - "--watch-namespaces={{ .Values.args.watchNamespaces }}"
+            - "--concurrency={{ .Values.args.concurrency }}"
+            - "--cache-sync-timeout={{ .Values.args.cacheSyncTimeoutSeconds }}s"
+            - "--zap-log-level=debug"
+          resources:
+{{- toYaml .Values.resources | nindent 12 }}
+      nodeSelector:
+{{- toYaml .Values.nodeSelector | nindent 8 }}
+      tolerations:
+{{- toYaml .Values.tolerations | nindent 8 }}
+      affinity:
+{{- toYaml .Values.affinity | nindent 8 }}
