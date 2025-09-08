@@ -1,10 +1,10 @@
+// internal/controller/helpers.go
 package controller
 
 import (
 	"fmt"
 	"strings"
 	"unicode"
-	"text/template"
 )
 
 // Best-effort derive project from namespace (supports "p-<project>")
@@ -15,33 +15,11 @@ func projectFromNamespace(ns string) string {
 	return ""
 }
 
-func TemplateFuncMap() template.FuncMap {
-	return template.FuncMap{
-		"label": func(m map[string]string, k string) string { return m[k] },
-		"ann":   func(m map[string]string, k string) string { return m[k] },
-		"default": func(def string, v string) string {
-			if v == "" { return def }
-			return v
-		},
-		"coalesce": func(vals ...string) string {
-			for _, v := range vals {
-				if strings.TrimSpace(v) != "" {
-					return v
-				}
-			}
-			return ""
-		},
-		"dns1123":       sanitizeDNS1123,
-		"projectFromNS": projectFromNamespace,
-	}
-}
-
 // Sanitize to DNS-1123 label (lowercase alnum and '-', max 63, no leading/trailing '-')
 func sanitizeDNS1123(in string) string {
 	if in == "" {
 		return "id"
 	}
-	// Lowercase and map disallowed -> '-'
 	sb := strings.Builder{}
 	sb.Grow(len(in))
 	for _, r := range strings.ToLower(in) {
@@ -73,12 +51,10 @@ func hasAnyPrefix(prefixes []string, key string) bool {
 }
 
 // toCamel converts keys like "flux-app/podinfo", "team-name", "env.region"
-// -> "fluxAppPodinfo", "teamName", "envRegion"
 func toCamel(s string) string {
 	if s == "" {
 		return s
 	}
-	// split on common separators
 	parts := strings.FieldsFunc(s, func(r rune) bool {
 		switch r {
 		case '-', '_', '.', '/', ':':
@@ -90,14 +66,12 @@ func toCamel(s string) string {
 	if len(parts) == 0 {
 		return s
 	}
-	// lower first, TitleCase the rest
 	var b strings.Builder
 	b.WriteString(strings.ToLower(parts[0]))
 	for _, p := range parts[1:] {
 		if p == "" {
 			continue
 		}
-		// Title case: upper first rune, lower the rest
 		runes := []rune(p)
 		runes[0] = unicode.ToUpper(runes[0])
 		for i := 1; i < len(runes); i++ {
@@ -105,7 +79,6 @@ func toCamel(s string) string {
 		}
 		b.WriteString(string(runes))
 	}
-	// strip any remaining non-alnum just in case
 	out := b.String()
 	clean := strings.Builder{}
 	for _, r := range out {
