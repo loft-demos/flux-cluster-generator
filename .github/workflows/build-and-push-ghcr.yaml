@@ -3,6 +3,9 @@ name: build-and-push-ghcr
 on:
   push:
     branches: [ main ]
+    paths:
+      - 'cmd/**'
+      - 'internal/**'
   workflow_dispatch:
     inputs:
       tag:
