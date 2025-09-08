@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -137,7 +138,6 @@ func (r *SecretMirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			}
 		}
 	}
-
 	_ = unstructured.SetNestedField(desired.Object, map[string]any{
 		"type":          "Static",
 		"defaultValues": dv,
@@ -222,12 +222,9 @@ func (r *SecretMirrorReconciler) ensureRSIPAbsence(ctx context.Context, secretNN
 			log.Info("deleted RSIP", "name", rsip.GetName())
 		}
 	}
+	// No Eventf here: we don't have a runtime.Object for a deleted Secret.
 	if deleted > 0 {
-		r.Recorder.Eventf(&corev1.ObjectReference{
-			Kind:      "Secret",
-			Namespace: secretNN.Namespace,
-			Name:      secretNN.Name,
-		}, corev1.EventTypeNormal, "RSIPsDeleted", "deleted %d RSIP(s) for secret %s", deleted, secretNN.String())
+		log.Info("deleted RSIPs for secret", "secret", secretNN.String(), "count", deleted)
 	}
 	if len(errs) > 0 {
 		return fmt.Errorf("cleanup had %d error(s), deleted=%d", len(errs), deleted)
