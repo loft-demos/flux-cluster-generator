@@ -1,6 +1,17 @@
 # flux-cluster-generator
 
-The **flux-cluster-generator** is a lightweight Kubernetes controller that watches for Kubernetes `Secrets` containing a KubeConfig (for use as a Flux KubeConfig reference for Flux `HelmRelease` and/or `Kustomization` resources)  and that have a specific configurable label (defaults to `fluxcd.io/secret-type=cluster`). Based on that `Secret`, the controller generates a [`ResourceSetInputProvider`]([https://fluxcd.io](https://fluxcd.control-plane.io/operator/resourcesetinputprovider/)) (RSIP) resource that will include the `Secret` name, namespace and kubeconfig key as `defaultValues` and `.metadata.labels` of the RSIP and  optional additional `defaultValues` added from the `Secret` `labels` based on configuration documented below.
+The **flux-cluster-generator** is a lightweight Kubernetes controller that watches for [Flux KubeConfig reference `Secrets`](https://fluxcd.io/flux/components/helm/helmreleases/#kubeconfig-reference) and, creates and manages [Flux `ResourceSetInputProviders`](https://fluxcd.control-plane.io/operator/resourcesetinputprovider/) based on those `Secrets`. 
+
+The controller watches for Kubernetes Secrets that:
+- Contain a valid KubeConfig (for use as a Flux KubeConfig reference for HelmRelease and/or Kustomization resources).
+- Match a configurable label selector (default: `fluxcd.io/secret-type=cluster`).
+- Optionally watch namespaces that match a configurable label selector (e.g. `flux-cluster-generator-enabled=true`)
+
+For each matching Secret, the controller creates a corresponding ResourceSetInputProvider (RSIP).
+- The generated RSIP includes the Secret’s name, namespace, and KubeConfig key as defaultValues and as .metadata.labels.
+- Optional extra defaultValues can also be derived from the Secret’s labels, based on configuration (see below).
+
+## Why use this?
 
 This enables GitOps-style generation of Kuberentes resources for multiple dynamic Kubernetes clusters using one [Flux `ResourceSet`](https://fluxcd.control-plane.io/operator/resourceset/) similar to the [Argo CD Cluster Generator for `ApplicationSets`](https://argo-cd.readthedocs.io/en/stable/operator-manual/applicationset/Generators-Cluster/). While the documentation for Flux `ResourceSets` does include a [_Multi-cluster example_](https://fluxcd.control-plane.io/operator/resourcesets/app-definition/#multi-cluster-example), it is very static and would require adding and removing cluster inputs in every `ResourceSet` you would like to use across multiple clusters. The **flux-cluster-generator** works more like the Argo CD Cluster Generator for `ApplicationSets` in that it will dynamically associate a new Kuberenetes cluster represented as a Kubernetes Flux KubeConfig reference `Secret` and allow the reuse of Flux `ResourceSets` across all of those clusters by generating a cluster specific `ResourceInputProvider` based on each of those `Secrets`. While originally designed for dynamic vCluster environments (and paired with the [**vcluster-platform-flux-secret-controller**](https://github.com/loft-demos/vcluster-platform-flux-secret-controller)), it can be used with any Kubernetes Flux KubeConfig reference `Secret`.
 
