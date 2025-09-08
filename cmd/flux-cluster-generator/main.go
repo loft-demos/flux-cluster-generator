@@ -27,6 +27,11 @@ func main() {
 	flag.StringVar(&opts.LabelSelectorStr, "label-selector", "", "Label selector for source Secrets (e.g. fluxcd.io/secret-type=cluster)")
 	flag.StringVar(&opts.SecretKey, "secret-key", "config", "Key in Secret.data that contains the kubeconfig")
 	flag.StringVar(&opts.RSIPNamePrefix, "rsip-name-prefix", "inputs-", "Prefix for generated RSIP names")
+	flag.StringVar(&opts.RSIPNameTemplateStr, "rsip-name-template", "",
+		`Go template to compute the RSIP name (without prefix). 
+Context: .name .namespace .labels .annotations
+Funcs: label, ann, default, coalesce, dns1123, projectFromNS
+Example: '{{ dns1123 (coalesce (label "vci.flux.loft.sh/project") (projectFromNS .namespace)) }}-{{ dns1123 (coalesce (label "vci.flux.loft.sh/name") .name) }}'`)
 	flag.StringVar(&opts.ClusterNameKey, "cluster-name-label-key", "vci.flux.loft.sh/name", "Label key on the Secret to derive cluster name")
 	flag.StringVar(&opts.ProjectLabelKey, "project-label-key", "vci.flux.loft.sh/project", "Label key on the Secret containing the VCI project")
 	flag.StringVar(&opts.CopyLabelKeysCSV, "copy-label-keys", "env,team,region", "Comma-separated label KEYS to copy from Secret to RSIP")
@@ -41,6 +46,18 @@ func main() {
 
 	flag.Parse()
 	opts.CacheSyncTimeout = time.Duration(cacheSyncSeconds) * time.Second
+
+	// Parse template (if provided) & general validation
+	if opts.RSIPNameTemplateStr != "" {
+		tmpl, err := template.New("rsipName").
+			Funcs(controller.TemplateFuncMap()).
+			Parse(opts.RSIPNameTemplateStr)
+		if err != nil {
+			logger.Error(err, "invalid --rsip-name-template")
+			os.Exit(1)
+		}
+		opts.RSIPNameTemplate = tmpl
+	}
 
 	// parse selectors / CSVs and validate required fields
 	if err := opts.FillAndValidate(); err != nil {
