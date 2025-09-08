@@ -6,25 +6,17 @@ import (
 	"fmt"
 	"maps"
 	"strings"
-	"sync"
-	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/tools/record"
-	"k8s.io/client-go/util/workqueue"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller"
-	"sigs.k8s.io/controller-runtime/pkg/event"
-	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
@@ -41,81 +33,6 @@ type SecretMirrorReconciler struct {
 
 	Opts      Options
 	allowedNS *threadSafeSet
-}
-
-func SetupRSIPController(mgr ctrl.Manager, opts Options) error {
-	allowed := newThreadSafeSet()
-
-	r := &SecretMirrorReconciler{
-		Client:    mgr.GetClient(),
-		APIReader: mgr.GetAPIReader(),
-		Recorder:  mgr.GetEventRecorderFor("flux-cluster-generator"),
-		Opts:      opts,
-		allowedNS: allowed,
-	}
-
-	// Seed allowlist at start
-	var nsList corev1.NamespaceList
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if err := mgr.GetAPIReader().List(ctx, &nsList); err == nil {
-		for i := range nsList.Items {
-			if opts.NamespaceSelector.Matches(labels.Set(nsList.Items[i].Labels)) {
-				allowed.Add(nsList.Items[i].Name)
-			}
-		}
-		ctrl.Log.WithName("setup").V(1).Info("seeded allowed namespaces",
-			"count", len(allowed.m))
-	} else {
-		ctrl.Log.WithName("setup").Error(err, "failed to seed allowed namespaces")
-	}
-
-	// Namespace controller
-	nsPred := predicate.Funcs{
-		CreateFunc: func(e event.CreateEvent) bool { return opts.NamespaceSelector.Matches(labels.Set(e.Object.GetLabels())) },
-		UpdateFunc: func(e event.UpdateEvent) bool { return opts.NamespaceSelector.Matches(labels.Set(e.ObjectNew.GetLabels())) },
-		DeleteFunc: func(e event.DeleteEvent) bool { return true },
-		GenericFunc: func(e event.GenericEvent) bool { return opts.NamespaceSelector.Matches(labels.Set(e.Object.GetLabels())) },
-	}
-	if err := ctrl.NewControllerManagedBy(mgr).
-		For(&corev1.Namespace{}, builder.WithPredicates(nsPred)).
-		WithOptions(controller.Options{MaxConcurrentReconciles: 1}).
-		Complete(&NamespaceSetReconciler{Client: mgr.GetClient(), AllowedNS: allowed, Selector: opts.NamespaceSelector}); err != nil {
-		return err
-	}
-
-	// Optional NS filter list
-	watchNS := sets.New[string](opts.WatchNamespaces...)
-
-	// Secret controller
-	secPred := predicate.Funcs{
-		CreateFunc: func(e event.CreateEvent) bool {
-			return (watchNS.Len() == 0 || watchNS.Has(e.Object.GetNamespace())) &&
-				opts.LabelSelector.Matches(labels.Set(e.Object.GetLabels())) &&
-				allowed.Has(e.Object.GetNamespace())
-		},
-		UpdateFunc: func(e event.UpdateEvent) bool {
-			return (watchNS.Len() == 0 || watchNS.Has(e.ObjectNew.GetNamespace())) &&
-				opts.LabelSelector.Matches(labels.Set(e.ObjectNew.GetLabels())) &&
-				allowed.Has(e.ObjectNew.GetNamespace())
-		},
-		DeleteFunc:  func(e event.DeleteEvent) bool { return true },
-		GenericFunc: func(e event.GenericEvent) bool {
-			return (watchNS.Len() == 0 || watchNS.Has(e.Object.GetNamespace())) &&
-				opts.LabelSelector.Matches(labels.Set(e.Object.GetLabels())) &&
-				allowed.Has(e.Object.GetNamespace())
-		},
-	}
-
-	return ctrl.NewControllerManagedBy(mgr).
-		For(&corev1.Secret{}, builder.WithPredicates(secPred)).
-		WithOptions(controller.Options{
-			CacheSyncTimeout:        opts.CacheSyncTimeout,
-			RecoverPanic:            boolPtr(true),
-			RateLimiter:             workqueue.DefaultControllerRateLimiter(),
-			MaxConcurrentReconciles: opts.MaxConcurrent,
-		}).
-		Complete(r)
 }
 
 func (r *SecretMirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (reconcile.Result, error) {
