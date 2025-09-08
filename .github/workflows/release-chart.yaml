@@ -1,0 +1,49 @@
+name: Release Helm Chart (OCI)
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  helm-oci-publish:
+    runs-on: ubuntu-latest
+    env:
+      REGISTRY: ghcr.io
+      CHART_DIR: chart/flux-cluster-generator
+      OCI_NAMESPACE: ghcr.io/${{ github.repository_owner }}/charts
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        id: v
+        run: |
+          RAW="${GITHUB_REF_NAME}"         # e.g. v0.2.3
+          CLEAN="${RAW#v}"                 # 0.2.3
+          echo "version=${CLEAN}" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.14.4
+
+      - name: Helm registry login
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login $REGISTRY -u ${{ github.actor }} --password-stdin
+
+      - name: Lint chart
+        run: helm lint "$CHART_DIR"
+
+      - name: Package chart with version
+        run: |
+          helm package "$CHART_DIR" --version "${{ steps.v.outputs.version }}" --app-version "${{ steps.v.outputs.version }}" --destination dist
+          ls -l dist
+
+      - name: Push chart to GHCR (OCI)
+        run: |
+          CHART_TGZ="$(ls dist/*.tgz)"
+          helm push "$CHART_TGZ" "oci://${OCI_NAMESPACE}"
