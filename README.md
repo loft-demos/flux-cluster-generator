@@ -26,10 +26,12 @@ While originally designed for dynamic vCluster environments (and paired with the
 
 ### Use cases
 
-- Dynamic vCluster environments
+- **Dynamic vCluster environments**
+
   Originally built for vCluster Platform `VirtualClusterInstances` where it is common to have ephemeral or short-lived vCluster instances appear and disappear frequently. And when paired with [**vcluster-platform-flux-secret-controller**](https://github.com/loft-demos/vcluster-platform-flux-secret-controller), the Flux KubeConfig reference `Secret` will be created when a `VirtualClusterInstance` is created with a label selector.
 
-- Any Flux-managed clusters
+- **Any Flux-managed clusters**
+
   Works with any Kubernetes Secret that Flux recognizes as a KubeConfig reference, making it useful outside of vCluster as well.
 
 ---
