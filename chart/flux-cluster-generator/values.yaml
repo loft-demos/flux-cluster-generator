@@ -1,0 +1,37 @@
+image:
+  repository: ghcr.io/loft-demos/flux-cluster-generator
+  tag: ""   # default: appVersion
+  pullPolicy: IfNotPresent
+
+args:
+  rsipNamespace: "flux-apps"
+  labelSelector: "fluxcd.io/secret-type=cluster"
+  secretKey: "value"
+  rsipNamePrefix: "inputs-"
+  clusterNameKey: "vci.flux.loft.sh/name"
+  projectLabelKey: "vci.flux.loft.sh/project"
+  copyLabelKeys: "env,team,region"
+  copyLabelPrefixes: "flux-app/"
+  namespaceLabelSelector: ""   # e.g. "flux-cluster-generator-enabled=true"
+  watchNamespaces: ""          # comma list, empty = all
+  concurrency: 2
+  cacheSyncTimeoutSeconds: 120
+
+rbac:
+  create: true
+
+serviceAccount:
+  create: true
+  name: ""   # default: release name
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 300m
+    memory: 256Mi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
