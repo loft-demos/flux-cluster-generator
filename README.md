@@ -2,14 +2,14 @@
 
 _An Argo CD type Cluster Generator (ApplicationSets) for Flux ResourceSets_
 
-The **flux-cluster-generator** is a lightweight Kubernetes controller that watches for [Flux KubeConfig reference `Secrets`](https://fluxcd.io/flux/components/helm/helmreleases/#kubeconfig-reference). For every Flux KubeConfig reference `Secrets` that meet specific, configurable criteria, it creates and manages [Flux `ResourceSetInputProviders`](https://fluxcd.control-plane.io/operator/resourcesetinputprovider/) derived from those `Secrets`. 
+The **flux-cluster-generator** is a lightweight Kubernetes controller that watches for [Flux KubeConfig reference `Secrets`](https://fluxcd.io/flux/components/helm/helmreleases/#kubeconfig-reference). For every Flux KubeConfig reference `Secret` that meet specific, configurable criteria, it creates and manages [Flux `ResourceSetInputProviders`](https://fluxcd.control-plane.io/operator/resourcesetinputprovider/) derived from those `Secrets`. 
 
 The controller watches for Kubernetes Secrets that:
 - Contain a valid KubeConfig (for use as a Flux KubeConfig reference for HelmRelease and/or Kustomization resources).
 - Match a configurable label selector (default: `fluxcd.io/secret-type=cluster`).
 - Optionally watch namespaces that match a configurable label selector (e.g. `flux-cluster-generator-enabled=true`)
 
-For each matching Secret, the controller creates a corresponding ResourceSetInputProvider (RSIP).
+For each matching `Secret`, the controller creates a corresponding `ResourceSetInputProvider` (RSIP).
 - The generated RSIP includes the Secret’s name, namespace, and KubeConfig key as defaultValues and as `.metadata.labels`.
 - Optional extra defaultValues can also be derived from the Secret’s labels, based on configuration (see below).
 
@@ -91,6 +91,10 @@ spec:
   interval: 30m
   install:
     createNamespace: true
+  values:
+    args:
+      copyLabelKeys: "env,team,,app-subdomain"
+      namespaceLabelSelector: "flux-cluster-generator-enabled=true"
 ```
 
 ## Flags & Configuration
