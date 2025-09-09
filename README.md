@@ -1,5 +1,7 @@
 # flux-cluster-generator
 
+_An Argo CD Cluster Generator (ApplicationSets) for Flux ResourceSets_
+
 The **flux-cluster-generator** is a lightweight Kubernetes controller that watches for [Flux KubeConfig reference `Secrets`](https://fluxcd.io/flux/components/helm/helmreleases/#kubeconfig-reference). For Flux KubeConfig reference `Secrets` that meet specific, configurable criteria it creates and manages [Flux `ResourceSetInputProviders`](https://fluxcd.control-plane.io/operator/resourcesetinputprovider/) derived from those `Secrets`. 
 
 The controller watches for Kubernetes Secrets that:
